@@ -12,7 +12,9 @@ FILES=security_plugin.c
 CC=gcc
 
 # flags
-FLAGS=-std=gnu99 -Wall -Wextra
+FLAGS=-std=gnu99
+CFLAGS=-fPIC
+LDFLAGS=-shared
 
 
 build: ${TARGET}
@@ -30,10 +32,8 @@ uninstall:
 
 # clean
 clean:
-	rm -f *.o ${TARGET}
+	rm -rf obj *.o ${TARGET}
 
 
 ${TARGET}: ${FILES}
-	${CC} ${FILES} -o ${TARGET} ${FLAGS}
-
-
+	${CC} ${FILES} ${FLAGS} ${CFLAGS} ${LDFLAGS} -o ${TARGET}

@@ -72,24 +72,52 @@ static char* find_in_path(char *command, char **envp)
 }
 
 /*
+Frees 2D char array
+*/
+static void free_2d(char** array, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
+        free(array[i]);
+    }
+
+    free(array);
+}
+
+/*
+Check if array contains string
+*/
+static bool array_contains(char* str, char** array, size_t count)
+{
+    for (size_t i = 0; i < count; ++i)
+    {
+        if (strcmp(array[i], str) == 0)
+            return true;
+    }
+    return false;
+}
+
+/*
 Reads user names from conf file
 */
-
-static short get_usernames(char **users)
+static int get_users(char **users)
 {
     FILE *fp;
 
     if ( (fp = fopen(PLUGIN_CONF_FILE, "r")) != NULL )
     {
         char buffer[MAX_LINE];
-        short usercount = 0;
-        short usersize = 2;
+        size_t usercount = 0;
+        size_t usersize = 2;
         size_t len;
-
         struct passwd *pw;
         struct group *grp;
 
-        users = malloc(usersize * sizeof(char*));
+        if ( (users = malloc(usersize * sizeof(char*))) == NULL)
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "Could not allocate data\n");
+            return -1;
+        }
 
         while (! feof(fp))
         {
@@ -97,22 +125,34 @@ static short get_usernames(char **users)
 
             len = strlen(buffer);
 
-            // ignore empty lines/comments
+            // ignore empty lines and comments
             if (len > 0 && buffer[0] != '#')
             {
                 if (usercount == usersize)
                 {
                     usersize *= 2;
-                    users = realloc(users, usersize * sizeof(char*));
+
+                    if ( (users = realloc(users, usersize * sizeof(char*))) == NULL)
+                    {
+                        sudo_log(SUDO_CONV_ERROR_MSG, "Could not allocate data\n");
+                            return usercount;  /// TODO
+                    }
                 }
 
                 if (strstr(buffer, "user ") == 0 && len > 5)
                 {
                     char user[MAX_USER_LENGTH + 1];
-                    strncpy(user, buffer+5, len-5); // strlen("user ") == 5
+                    strcpy(user, buffer+5); // strlen("user ") == 5
 
                     // checks if user exists
                     if (getpwnam(user) == NULL)
+                    {
+                        sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", user);
+                        continue;
+                    }
+
+                    // checks if user is already loaded
+                    if (array_contains(user, users, usercount))
                         continue;
 
                     // save user name
@@ -125,13 +165,20 @@ static short get_usernames(char **users)
                 {
                     // get user id
                     char uid_str[MAX_NUM_LENGTH + 1];
-                    strncpy(uid_str, buffer+4, len-4); // strlen("uid ") == 4
+                    strcpy(uid_str, buffer+4); // strlen("uid ") == 4
 
                     // get user struct
                     uid_t id = atoi(uid_str);
                     pw = getpwuid(id);
 
                     if (pw == NULL)
+                    {
+                        sudo_log(SUDO_CONV_ERROR_MSG, "user with id %s not found\n", uid_str);
+                        continue;
+                    }
+
+                    // checks if user is already loaded
+                    if (array_contains(pw->pw_name, users, usercount))
                         continue;
 
                     // save user name
@@ -145,19 +192,26 @@ static short get_usernames(char **users)
                 {
                     // get group name
                     char group[MAX_GROUP_LENGTH + 1];
-                    strncpy(group, buffer+6, len-6); // strlen("group ") == 6
+                    strcpy(group, buffer+6); // strlen("group ") == 6
 
                     // get group struct
                     grp = getgrnam(group);
 
                     if (grp == NULL)
+                    {
+                        sudo_log(SUDO_CONV_ERROR_MSG, "group %s not found\n", group);
                         continue;
+                    }
 
                     // get group members
                     for (int i = 0; ; i++)
                     {
                         if (grp->gr_mem[i] == NULL)
                             break;
+
+                        // checks if user is already loaded
+                        if (array_contains(grp->gr_mem[i], users, usercount))
+                            continue;
 
                         // save user name
                         users[usercount] = malloc( strlen(grp->gr_mem[i]) + 1 );
@@ -170,20 +224,27 @@ static short get_usernames(char **users)
                 {
                     // get group id
                     char gid_str[MAX_NUM_LENGTH + 1];
-                    strncpy(gid_str, buffer+4, len-4); // strlen("gid ") == 4
+                    strcpy(gid_str, buffer+4); // strlen("gid ") == 4
 
                     // get group struct
                     gid_t id = atoi(gid_str);
                     grp = getgrgid(id);
 
                     if (grp == NULL)
+                    {
+                        sudo_log(SUDO_CONV_ERROR_MSG, "group with id %s not found\n", gid_str);
                         continue;
+                    }
 
                     // get group members
                     for (int i = 0; ; i++)
                     {
                         if (grp->gr_mem[i] == NULL)
                             break;
+
+                        // checks if user is already loaded
+                        if (array_contains(grp->gr_mem[i], users, usercount))
+                            continue;
 
                         // save user name
                         users[usercount] = malloc( strlen(grp->gr_mem[i]) + 1 );
@@ -204,18 +265,6 @@ static short get_usernames(char **users)
     }
 }
 
-/*
-Frees 2D char array
-*/
-static void free_2d(char** array, unsigned int count)
-{
-    for (unsigned int i = 0; i < count; ++i)
-    {
-        free(array[i]);
-    }
-
-    free(array);
-}
 
 /*
 Checks passwords
@@ -229,7 +278,7 @@ static int check_passwd()
     char** users = NULL;
     char message[64];
 
-    short count = get_usernames(users);
+    int count = get_users(users);
 
     if (count == -1)
     {
@@ -283,7 +332,6 @@ static int check_passwd()
             free_2d(users, count);
             return false;
         }
-
     }
 
     free_2d(users, count);
