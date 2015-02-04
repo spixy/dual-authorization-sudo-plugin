@@ -1,16 +1,15 @@
 #ifndef SUDO_HELPER_INCLUDED
 #define SUDO_HELPER_INCLUDED
 
-#define PLUGIN_CONF_FILE          "/etc/sudo_security_plugin.conf"
-#define PLUGIN_DATA_DIR           "/etc/sudo_security_plugin/"
-#define PLUGIN_COMMANDS_LIST_FILE "/etc/sudo_security_plugin/commands"
-#define PLUGIN_AUTH_USERS_FILE    "/etc/sudo_security_plugin/auth_users"
-#define PLUGIN_NAME               "Sudo Security Plugin"
+#define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
+#define PLUGIN_DATA_DIR                 "/etc/sudo_security_plugin/"
+#define PLUGIN_COMMANDS_FILE            "/etc/sudo_security_plugin/commands"         // no authentication to these command
+#define PLUGIN_APPLY_COMMANDS_FILE      "/etc/sudo_security_plugin/commands_apply"   // 1/2 user authenticated to apply-all
+#define PLUGIN_RESET_COMMANDS_FILE      "/etc/sudo_security_plugin/commands_reset"   // 1/2 user authenticated to reset-all
+#define PLUGIN_APPLY_AUTH_FILE          "/etc/sudo_security_plugin/apply_auth"
+#define PLUGIN_CLEAR_AUTH_FILE          "/etc/sudo_security_plugin/clear_auth"
+#define PLUGIN_NAME                     "Sudo Security Plugin"
 
-#define QUOTE(name) #name
-#define STR(macro) QUOTE(macro)
-
-#define BUFFER_SIZE       256
 #define MAX_USER_LENGTH    32
 #define MAX_GROUP_LENGTH  255
 #define MAX_NUM_LENGTH     15
@@ -22,6 +21,9 @@
 #else
 # define ROOT_UID       0
 #endif
+
+#define QUOTE(name) #name
+#define STR(macro) QUOTE(macro)
 
 struct plugin_state
 {
@@ -39,9 +41,9 @@ typedef struct _command_data
 } command_data;
 
 /*
-Check if strings starts with string
+Check if strings starts with substring
 */
-bool str_starts(const char *a, const char *b)
+static bool str_starts(const char * a, const char * b)
 {
     if (strncmp(a, b, strlen(b)) == 0)
         return true;
@@ -52,7 +54,7 @@ bool str_starts(const char *a, const char *b)
 /*
 Frees 2D array
 */
-static void free_2d(char** array, size_t count)
+static void free_2d(char ** array, size_t count)
 {
     for (size_t i = 0; i < count; ++i)
     {
@@ -67,7 +69,7 @@ static void free_2d(char** array, size_t count)
 /*
 Frees 2D array
 */
-static void free_2d_null(char** array)
+static void free_2d_null(char ** array)
 {
     size_t i=0;
 
@@ -99,9 +101,22 @@ static void free_command(command_data * command)
 }
 
 /*
+Frees commands
+*/
+static void free_commands_null(command_data ** commands)
+{
+    int i = 0;
+    while (commands[i] != NULL)
+    {
+        free_command(commands[i]);
+        i++;
+    }
+}
+
+/*
 Check if array contains string
 */
-static bool array_contains(const char* str, char** array, size_t count)
+static bool array_contains(const char * str, const char ** array, size_t count)
 {
     for (size_t i = 0; i < count; ++i)
     {
@@ -114,13 +129,13 @@ static bool array_contains(const char* str, char** array, size_t count)
 /*
 Search for file in a PATH variable
 */
-static char* find_in_path(char * command, char ** envp)
+static char * find_in_path(char * command, char ** envp)
 {
     struct stat sb;
-    char *path = NULL, *cp_path, **ep;
+    char * path = NULL, *cp_path, **ep;
     char * cmd = NULL;
 
-     /* Already path */
+     /* Already a path */
     if (strchr(command, '/') != NULL)
         return strdup(command);
 
@@ -129,7 +144,7 @@ static char* find_in_path(char * command, char ** envp)
         /* Search for PATH in environment vars */
         if (str_starts(*ep,"PATH="))
         {
-            path = *ep + 5;
+            path = * ep + 5;
             break;
         }
     }
@@ -156,7 +171,7 @@ static char* find_in_path(char * command, char ** envp)
 
     if (cp_path != NULL)
     {
-        char *token;
+        char * token;
 
         /* First path */
         token = strtok(cp_path, ":");
@@ -174,6 +189,7 @@ static char* find_in_path(char * command, char ** envp)
                 /* Check if file exist in path & have permission to execute */
                 if (S_ISREG(sb.st_mode) && (sb.st_mode & 0000111))
                 {
+                    free(cp_path);
                     return cmd;
                 }
             }
@@ -183,15 +199,17 @@ static char* find_in_path(char * command, char ** envp)
             token = strtok(NULL, ":");
         };
     }
+
+    free(cp_path);
     return NULL;
 }
 
 /*
 * Creates a name=value string
 */
-static char* formate_string(const char* name, const char* value)
+static char * formate_string(const char * name, const char * value)
 {
-    char *str = malloc(strlen(name) + 1 + strlen(value) + 1);
+    char * str = malloc(strlen(name) + 1 + strlen(value) + 1);
 
     if (str != NULL)
     {

@@ -50,30 +50,35 @@ static uid_t runas_uid;
 static gid_t runas_gid;
 static const char * runas_user = NULL;
 static const char * runas_group = NULL;
+static char * user;
 static char * pwd;
 static int use_sudoedit = false;
 
 static char** get_users();
-static int save_command(int argc, char * const argv[]);
+
+static int save_command(const int argc, const char * const argv[]);
 static command_data * load_command(char * buffer);
 static command_data * load_commands();
-//static char** build_command_info(const char *command);
+
+static int check_authorization(const char * user, const char * file);
+static int save_authorization(const char * user, const char * file);
+
 static int check_passwd(const char* user);
 static int check_pam_result(int result);
+//static char** build_command_info(const char *command);
 static int execute(command_data * command);
-
 
 /*
 Reads user names from conf file
 */
 static char** get_users()
 {
-    FILE *fp;
+    FILE * fp;
     char ** users;
 
     if ( (users = malloc( (MAX_USERS+1) * sizeof(char*))) == NULL)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "cannot not allocate data\n");
+        sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
         return NULL;
     }
     users[MAX_USERS] = NULL;
@@ -81,6 +86,7 @@ static char** get_users()
     if ( (fp = fopen(PLUGIN_CONF_FILE, "r")) == NULL )
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "%s not found\n", STR(PLUGIN_CONF_FILE));
+        free(users);
         return NULL;
     }
 
@@ -420,6 +426,16 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
         }
     }
 
+    /* Only allow commands to be run as root */
+    for (ui = user_info; *ui != NULL; ui++)
+    {
+        if (str_starts(*ui, "user="))
+        {
+            user = *ui + sizeof("user=") - 1;
+            break;
+        }
+    }
+
     if (runas_user != NULL)
     {
         if ((pw = getpwnam(runas_user)) == NULL)
@@ -559,26 +575,21 @@ Save sudo commands to file
     return commands;
 }*/
 
-static int save_command(int argc, char * const argv[])
+static int save_command(const int argc, const char * const argv[])
 {
     FILE * fp;
     char * str = NULL;
 
-    if ( (fp = fopen(PLUGIN_COMMANDS_LIST_FILE, "a")) == NULL )
+    if ( (fp = fopen(PLUGIN_COMMANDS_FILE, "a")) == NULL )
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "could not open %s\n", STR(PLUGIN_COMMANDS_LIST_FILE));
         return false;
     }
 
     for (int i = 0; i < argc; ++i)
     {
-        /*char str [ strlen(argv[i])+2+1 ];
-        strcpy(str, "\"");
-        strcat(str, argv[i]);
-        strcat(str, "\"");*/
-
         if ( asprintf(&str, "\"%s\" ", argv[i]) < 0 || fputs(str, fp) == EOF )
         {
+            free(str);
             fclose(fp);
             return false;
         }
@@ -595,69 +606,79 @@ static int save_command(int argc, char * const argv[])
     if ( asprintf(&str, "\nrunas_user=%s ", runas_user) < 0 || fputs(str, fp) == EOF ||
          asprintf(&str, "runas_group=%s\n",  runas_group) < 0 || fputs(str, fp) == EOF )
     {
+        free(str);
         fclose(fp);
         return false;
     }
 
+    free(str);
     fclose(fp);
+
     return true;
 }
 
 /*
 Saves already authorized users
 */
-/*static int save_authorization(const char user[])
+static int save_authorization(const char * user, const char * file)
 {
-    FILE *fp;
+    FILE * fp;
+    char * user_str = NULL;
 
-    if ( (fp = fopen(PLUGIN_AUTH_USERS_FILE, "a")) == NULL )
+    if ( (fp = fopen(file, "a")) == NULL ||
+         asprintf(&user_str, "%s\n", user) < 0 ||
+         fputs(user_str, fp) == EOF )
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "could not open %s\n", STR(PLUGIN_COMMANDS_LIST_FILE));
-        return false;
-    }
-
-    char user_str [strlen(user) + 2];
-
-    strcpy(user_str, user);
-    strcat(user_str, "\n");
-
-    if ( fputs(user_str, fp) == EOF )
-    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "cannot save authorization information to %s\n",file);
         fclose(fp);
         return false;
     }
 
+    free(user_str);
     fclose(fp);
+    sudo_log(SUDO_CONV_INFO_MSG, "User %d/%d authorized. \n", 1, MAX_USERS);
     return true;
-}*/
+}
 
 /*
-Checks if user has not authorized sudo commands
+Checks if user has not authorized sudo commands yet
+Returns user count or -1 if current user is alreadyin file
 */
-/*static int check_authorization(const char user[])
+static int check_authorization(const char * user, const char * file)
 {
-    FILE *fp;
-    char* buffer = NULL;
+    FILE * fp;
+    char * buffer = NULL;
     size_t buflen = 0;
-    int len;
+    ssize_t len;
+    int lines = 0;
 
-    if ( (fp = fopen(PLUGIN_AUTH_USERS_FILE, "r")) == NULL )
-        return true;
+    ///TODO get_users()
+    char ** users = get_users();
+    if (! array_contains(user, users, MAX_USERS))
+    {
+        free_2d(users, MAX_USERS);
+        return -2;
+    }
+    free_2d(users, MAX_USERS);
 
-    while (len = getline(&buffer, &buflen, fp) != -1)
+    if ( (fp = fopen(file, "r")) == NULL )
+        return 0;
+
+    while ( (len = getline(&buffer, &buflen, fp)) != -1 )
     {
         if (strncmp(buffer, user, len-1) == 0)
         {
             fclose(fp);
             free(buffer);
-            return false;
+            return -1;
         }
+        lines++;
     }
 
     fclose(fp);
     free(buffer);
-    return true;
-}*/
+    return lines;
+}
 
 /*
 Parse line and load command
@@ -752,11 +773,13 @@ static command_data * load_commands()
         return NULL;
     }
 
-    if ( (fp = fopen(PLUGIN_COMMANDS_LIST_FILE, "r")) == NULL )
+    if ( (fp = fopen(PLUGIN_COMMANDS_FILE, "r")) == NULL )
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "cannot open %s\n", STR(PLUGIN_COMMANDS_LIST_FILE));
+        free(cmds);
         return NULL;
     }
+
+    cmds[0] = NULL;
 
     /* Read line */
     while ( (len = getline(&buffer, &buflen, fp)) != -1 )
@@ -777,6 +800,8 @@ static command_data * load_commands()
 
             if (strlen(token) > strlen("runas_group="))
                 cmds[count -2]->runas_gid = strdup(token + strlen("runas_group="));
+
+            ///TODO
         }
 
         count++;
@@ -785,23 +810,18 @@ static command_data * load_commands()
         if ( (more_cmds = realloc(cmds, count * sizeof(command_data*))) == NULL )
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
-            for (ssize_t j = 0; j < count - 1; ++j)
-            {
-                free_command(cmds[j]);
-            }
+            free_commands_null(cmds);
             free(buffer);
             fclose(fp);
             return NULL;
         }
 
         cmds = more_cmds;
-
         cmds[count -2] = load_command(buffer);
+        cmds[count -1] = NULL;
 
         even = !even;
     }
-
-    cmds[count-1] = NULL;
 
     free(buffer);
     fclose(fp);
@@ -979,14 +999,12 @@ Print command with arguments
 static void print_command(command_data * command)
 {
     int i = 0;
-
     while (command->argv[i] != NULL)
     {
         sudo_log(SUDO_CONV_INFO_MSG, command->argv[i]);
         sudo_log(SUDO_CONV_INFO_MSG, " ");
         i++;
     }
-
     sudo_log(SUDO_CONV_INFO_MSG, "\n");
 }
 
@@ -1003,16 +1021,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
     if (argc > 0 && strcmp(argv[0],"apply-all") == 0)
     {
-        char ** users = get_users();
-        int i = 0;
-
-        /* No authorized users found */
-        if (users == NULL)
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "no users set in %s\n", STR(PLUGIN_CONF_FILE));
-            return -1;
-        }
-
+        int i = 0, count;
         command_data ** commands = load_commands();
 
         /* No commands found */
@@ -1030,72 +1039,59 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             i++;
         }
 
-        i = 0;
+        count = check_authorization(user, PLUGIN_APPLY_AUTH_FILE);
 
-        /* Authenticate all users */
-        while (users[i] != NULL)
+        if ( count == -1 )
         {
-            /*if (! check_authorization(user_name))
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "user %s already authorized sudo commands\n", user_name);
-                return -1;
-            }*/
+            sudo_log(SUDO_CONV_ERROR_MSG, "you have already authorized to run sudo commands\n");
+            free_commands_null(commands);
+            return -1;
+        }
+        if ( count == -2 )
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "you do not have permissions to run sudo commands\n");
+            free_commands_null(commands);
+            return -1;
+        }
 
-            if (!check_passwd(users[i]))
+        /* Authenticate user */
+        if (! check_passwd(user))
+        {
+            free_commands_null(commands);
+            return -1;
+        }
+
+        sudo_log(SUDO_CONV_INFO_MSG, "\n");
+
+        /* Run all commands */
+        if ( count == MAX_USERS - 1 )
+        {
+            i = 0;
+            while (commands[i] != NULL)
             {
-                i = 0;
-                while (commands[i] != NULL)
+                if (! execute(commands[i]))
                 {
-                    sudo_log(SUDO_CONV_INFO_MSG, "free:%d\n", i);
-                    free_command(commands[i]);
-                    i++;
+                    sudo_log(SUDO_CONV_ERROR_MSG, "cannot execute command\n");
+                    break;
                 }
-                free_2d_null(users);
-                return -1;
+                i++;
             }
 
-            i++;
+            remove(PLUGIN_COMMANDS_FILE);
+            remove(PLUGIN_APPLY_AUTH_FILE);
+            remove(PLUGIN_CLEAR_AUTH_FILE);
         }
-
-        i = 0;
-
-        /* Run commands */
-        while (commands[i] != NULL)
+        else
         {
-            if (!execute(commands[i]))
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "error\n");
-                break;
-            }
-
-            i++;
+            save_authorization(user, PLUGIN_APPLY_AUTH_FILE);
         }
 
-        remove(PLUGIN_COMMANDS_LIST_FILE);
-        remove(PLUGIN_AUTH_USERS_FILE);
-
-        i = 0;
-        while (commands[i] != NULL)
-        {
-            free_command(commands[i]);
-            i++;
-        }
-        free_2d_null(users);
-
+        free_commands_null(commands);
         return 0;
     }
     else if (argc > 0 && strcmp(argv[0], "reset-all") == 0)
     {
-        int i = 0;
-        char ** users = get_users();
-
-        /* No authorized users found */
-        if (users == NULL)
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "no users set in %s\n", STR(PLUGIN_CONF_FILE));
-            return -1;
-        }
-
+        int i = 0, count;
         command_data ** commands = load_commands();
 
         /* No commands found */
@@ -1106,62 +1102,67 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         }
 
         /* Print commands */
-        sudo_log(SUDO_CONV_INFO_MSG, "Commands to run:\n");
+        sudo_log(SUDO_CONV_INFO_MSG, "Commands to clear:\n");
         while (commands[i] != NULL)
         {
             print_command(commands[i]);
             i++;
         }
 
-        i = 0;
+        count = check_authorization(user, PLUGIN_CLEAR_AUTH_FILE);
 
-        /* Authenticate all users */
-        while (users[i] != NULL)
+        if ( count == -1 )
         {
-            /*if (! check_authorization(user_name))
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "user %s already authorized sudo commands\n", user_name);
-                return -1;
-            }*/
-
-            if (!check_passwd(users[i]))
-            {
-                i = 0;
-                while (commands[i] != NULL)
-                {
-                    free_command(commands[i]);
-                    i++;
-                }
-                free_2d_null(users);
-                return -1;
-            }
-
-            i++;
+            sudo_log(SUDO_CONV_ERROR_MSG, "you have already authorized to clear sudo commands\n");
+            free_commands_null(commands);
+            return -1;
         }
 
-        remove(PLUGIN_COMMANDS_LIST_FILE);
-        remove(PLUGIN_AUTH_USERS_FILE);
-
-        i = 0;
-        while (commands[i] != NULL)
+        if ( count == -2 )
         {
-            free_command(commands[i]);
-            i++;
+            sudo_log(SUDO_CONV_ERROR_MSG, "you do not have permissions to clear sudo commands\n");
+            free_commands_null(commands);
+            return -1;
         }
-        free_2d_null(users);
+
+        /* Authenticate user */
+        if (! check_passwd(user))
+        {
+            free_commands_null(commands);
+            return -1;
+        }
+
+        /* Clear all commands */
+        if ( count == MAX_USERS - 1 )
+        {
+            remove(PLUGIN_COMMANDS_FILE);
+            remove(PLUGIN_APPLY_AUTH_FILE);
+            remove(PLUGIN_CLEAR_AUTH_FILE);
+
+            sudo_log(SUDO_CONV_INFO_MSG, "Commands cleared.\n");
+        }
+        else
+        {
+            save_authorization(user, PLUGIN_CLEAR_AUTH_FILE);
+        }
+
+        free_commands_null(commands);
         return 0;
     }
     else
     {
         char * path;
 
+        /* Check if its regular command */
         if ((path = find_in_path(argv[0],plugin_state.envp)) == NULL)
         {
             free(path);
             return -2;
         }
+
         free(path);
 
+        /* Save command to file */
         if (save_command(argc, argv))
         {
             sudo_log(SUDO_CONV_INFO_MSG, "Commands saved\nRun all saved sudo commands by: sudo apply-all\nRemove all saved sudo commands by: sudo reset-all\n");
@@ -1169,7 +1170,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         }
         else
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "error while saving commands\n");
+            sudo_log(SUDO_CONV_ERROR_MSG, "cannot save command\n");
             return -1;
         }
     }
