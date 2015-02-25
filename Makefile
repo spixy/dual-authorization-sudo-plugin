@@ -18,7 +18,6 @@ CC=gcc
 FLAGS=-std=gnu99 -lpam -lpam_misc -fPIC -shared
 DFLAGS=-Wall -Wextra -Wp,-D_FORTIFY_SOURCE=2 -O2
 
-
 build: ${TARGET}
 
 # install, root only
@@ -31,7 +30,7 @@ install: build
 # uninstall, root only
 uninstall:
 	rm -f /usr/local/libexec/${TARGET}
-	rm -rf /etc/sudo_security_plugin/
+	#rm -rf /etc/sudo_security_plugin/
 	#[ -e "/etc/sudo_security_plugin.conf" ] && rm -f /etc/sudo_security_plugin.conf
 	#[ -e "/etc/sudo_security_plugin.conf~" ] && rm -f /etc/sudo_security_plugin.conf~
 	rm -f /etc/sudo.conf

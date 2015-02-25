@@ -32,23 +32,71 @@ struct plugin_state
     char * const * user_info;
 };
 
+/*
+        USER=beelzebub
+        PATH=/bin:/usr/bin
+        PWD=/Users/jleffler/tmp/soq
+        TZ=UTC0
+        SHLVL=1
+        HOME=/
+        LOGNAME=tarzan
+        _=/usr/bin/env
+        */
+
 typedef struct _command_data
 {
     char * file;
     char ** argv;
     char * runas_uid;
     char * runas_gid;
+    char * user;
+    char * home;
+    char * path;
+    char * pwd;
 } command_data;
+
+
+static int get_uid(const char * name)
+{
+    struct passwd *pw;
+
+    if ((pw = getpwnam(name)) != NULL)
+    {
+        return pw->pw_uid;
+    }
+
+    return -1;
+}
+
+
+static int get_gid(const char * name)
+{
+    struct group *grp;
+
+    if ((grp = getgrnam(name)) != NULL)
+    {
+        return grp->gr_gid;
+    }
+
+    return -1;
+}
 
 /*
 Check if strings starts with substring
 */
 static bool str_starts(const char * a, const char * b)
 {
-    if (strncmp(a, b, strlen(b)) == 0)
-        return true;
-    else
-        return false;
+    return (strncmp(a, b, strlen(b)) == 0);
+}
+
+/*
+Check if strings starts with substring
+*/
+static bool str_starts_and_ends(const char * a, const char * b)
+{
+    int len = strlen(a);
+
+    return ( (len >= 2) && (a[0] == b) && (a[len-1] == b) );
 }
 
 /*
@@ -84,6 +132,38 @@ static void free_2d_null(char ** array)
     array = NULL;
 }
 
+static char * pure_string(const char * str)
+{
+    size_t len = strlen(str);
+
+    char * newstr = malloc((len-1) * sizeof(char));
+    strncpy(newstr, str+1, len-2);
+    newstr[len-2] = '\0';
+
+    return newstr;
+}
+
+static command_data * make_command()
+{
+    command_data * command;
+
+    if ( (command = malloc( sizeof(command_data) )) == NULL )
+    {
+        return NULL;
+    }
+
+    command->argv = NULL;
+    command->file = NULL;
+    command->runas_uid = NULL;
+    command->runas_gid = NULL;
+    command->user = NULL;
+    command->home = NULL;
+    command->path = NULL;
+    command->pwd = NULL;
+
+    return command;
+}
+
 /*
 Frees command
 */
@@ -92,6 +172,10 @@ static void free_command(command_data * command)
     free(command->file);
     free(command->runas_uid);
     free(command->runas_gid);
+    free(command->user);
+    free(command->home);
+    free(command->path);
+    free(command->pwd);
 
     free_2d_null(command->argv);
 
@@ -111,12 +195,13 @@ static void free_commands_null(command_data ** commands)
         free_command(commands[i]);
         i++;
     }
+    commands = NULL;
 }
 
 /*
 Check if array contains string
 */
-static bool array_contains(const char * str, const char ** array, size_t count)
+static bool array_contains(const char * str, char ** array, size_t count)
 {
     for (size_t i = 0; i < count; ++i)
     {
@@ -207,7 +292,7 @@ static char * find_in_path(char * command, char ** envp)
 /*
 * Creates a name=value string
 */
-static char * formate_string(const char * name, const char * value)
+/*static char * format_string(const char * name, const char * value)
 {
     char * str = malloc(strlen(name) + 1 + strlen(value) + 1);
 
@@ -218,6 +303,6 @@ static char * formate_string(const char * name, const char * value)
         strcat(str, value);
     }
     return str;
-}
+}*/
 
 #endif // SUDO_HELPER_INCLUDED
