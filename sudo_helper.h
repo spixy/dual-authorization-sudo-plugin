@@ -3,9 +3,9 @@
 
 #define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
 #define PLUGIN_DATA_DIR                 "/etc/sudo_security_plugin/"
-#define PLUGIN_COMMANDS_FILE            "/etc/sudo_security_plugin/commands"         // no authentication to these command
-#define PLUGIN_APPLY_COMMANDS_FILE      "/etc/sudo_security_plugin/commands_apply"   // 1/2 user authenticated to apply-all
-#define PLUGIN_RESET_COMMANDS_FILE      "/etc/sudo_security_plugin/commands_reset"   // 1/2 user authenticated to reset-all
+#define PLUGIN_COMMANDS_ALL             "/etc/sudo_security_plugin/commands"         // all commands
+#define PLUGIN_COMMANDS_APPLY           "/etc/sudo_security_plugin/commands_apply"   // 1/2 user authenticated to apply-all
+#define PLUGIN_COMMANDS_CLEAR           "/etc/sudo_security_plugin/commands_clear"   // 1/2 user authenticated to reset-all
 #define PLUGIN_APPLY_AUTH_FILE          "/etc/sudo_security_plugin/apply_auth"
 #define PLUGIN_CLEAR_AUTH_FILE          "/etc/sudo_security_plugin/clear_auth"
 #define PLUGIN_NAME                     "Sudo Security Plugin"
@@ -165,10 +165,46 @@ static command_data * make_command()
 }
 
 /*
+Compare 2 arrays
+ 0 = same length
+>0 = length of smaller 2nd array
+<0 = length of smaller 1st array
+*/
+
+static int cmp_command(command_data ** cmd1, command_data ** cmd2)
+{
+    int i = 0;
+
+    while (cmd1[i] != NULL && cmd2[i] != NULL)
+    {
+        i++;
+    }
+
+    /* Both arrays have same length */
+    if (cmd1[i] == cmd2[i])
+    {
+        return 0;
+    }
+    /* 2nd longer */
+    else if (cmd1[i] == NULL)
+    {
+        return -i;
+    }
+    /* 1st longer */
+    else //if (cmd2[i] == NULL)
+    {
+        return i;
+    }
+}
+
+/*
 Frees command
 */
 static void free_command(command_data * command)
 {
+    if (command == NULL)
+        return;
+
     free(command->file);
     free(command->runas_uid);
     free(command->runas_gid);
@@ -189,6 +225,9 @@ Frees commands
 */
 static void free_commands_null(command_data ** commands)
 {
+    if (commands == NULL)
+        return;
+
     int i = 0;
     while (commands[i] != NULL)
     {
@@ -288,21 +327,5 @@ static char * find_in_path(char * command, char ** envp)
     free(cp_path);
     return NULL;
 }
-
-/*
-* Creates a name=value string
-*/
-/*static char * format_string(const char * name, const char * value)
-{
-    char * str = malloc(strlen(name) + 1 + strlen(value) + 1);
-
-    if (str != NULL)
-    {
-        strcpy(str, name);
-        strcat(str, "=");
-        strcat(str, value);
-    }
-    return str;
-}*/
 
 #endif // SUDO_HELPER_INCLUDED
