@@ -1,26 +1,27 @@
 #ifndef SUDO_HELPER_INCLUDED
 #define SUDO_HELPER_INCLUDED
 
-#define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
-#define PLUGIN_DATA_DIR                 "/etc/sudo_security_plugin/"
-#define PLUGIN_COMMANDS_ALL             "/etc/sudo_security_plugin/commands"         // all commands
-#define PLUGIN_COMMANDS_APPLY           "/etc/sudo_security_plugin/commands_apply"   // 1/2 user authenticated to apply-all
-#define PLUGIN_COMMANDS_CLEAR           "/etc/sudo_security_plugin/commands_clear"   // 1/2 user authenticated to reset-all
-#define PLUGIN_APPLY_AUTH_FILE          "/etc/sudo_security_plugin/apply_auth"
-#define PLUGIN_CLEAR_AUTH_FILE          "/etc/sudo_security_plugin/clear_auth"
 #define PLUGIN_NAME                     "Sudo Security Plugin"
 
-#define MAX_USER_LENGTH    32
-#define MAX_GROUP_LENGTH  255
-#define MAX_NUM_LENGTH     15
-#define MIN_USERS           2
-#define MAX_USERS           2
+#define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
+#define PLUGIN_DATA_DIR                 "/etc/sudo_security_plugin/"
+#define PLUGIN_COMMANDS_FILE            "/etc/sudo_security_plugin/commands"
+#define PLUGIN_COMMANDS_TEMP_FILE       "/tmp/sudo_security_plugin_XXXXXX"
+#define BOTH_USERS_AUTHENTICATED        " "
 
-#ifdef __TANDEM
+#define MAX_USER_LENGTH    32
+#define MAX_NUM_LENGTH      8
+#define AUTH_USERS          2
+
+#define FILTER_NOT_AUTH     0
+#define FILTER_AUTH_ME      1
+#define FILTER_AUTH_NOT_ME  2
+
+/*#ifdef __TANDEM
 # define ROOT_UID       65535
 #else
 # define ROOT_UID       0
-#endif
+#endif*/
 
 #define QUOTE(name) #name
 #define STR(macro) QUOTE(macro)
@@ -53,10 +54,12 @@ typedef struct _command_data
     char * home;
     char * path;
     char * pwd;
+    char * auth_by_user;
+    char * rem_by_user;
 } command_data;
 
 
-static int get_uid(const char * name)
+/*static int get_uid(const char * name)
 {
     struct passwd *pw;
 
@@ -66,10 +69,10 @@ static int get_uid(const char * name)
     }
 
     return -1;
-}
+}*/
 
 
-static int get_gid(const char * name)
+/*static int get_gid(const char * name)
 {
     struct group *grp;
 
@@ -79,7 +82,7 @@ static int get_gid(const char * name)
     }
 
     return -1;
-}
+}*/
 
 /*
 Check if strings starts with substring
@@ -92,11 +95,62 @@ static bool str_starts(const char * a, const char * b)
 /*
 Check if strings starts with substring
 */
-static bool str_starts_and_ends(const char * a, const char * b)
+/*static bool str_starts_and_ends(const char * a, const char * b)
 {
     int len = strlen(a);
 
     return ( (len >= 2) && (a[0] == b) && (a[len-1] == b) );
+}*/
+
+static unsigned int str_array_len(char ** array)
+{
+    unsigned int len = 0;
+
+    char ** str;
+    str = array;
+
+    while (*str != NULL)
+    {
+        str++;
+        len++;
+    }
+
+    return len;
+}
+
+/*
+Save string to binary file <length:2bytes><string>
+*/
+static int save_string(char * str, int fd)
+{
+    if (str != NULL)
+    {
+        unsigned int len = strlen(str) + 1;
+
+        return (write(fd, &len, 2) == 2 &&
+                write(fd, str, len) == (int)len);
+    }
+    else
+    {
+        unsigned int zero = 0;
+        return (write(fd, &zero, 2) == 2);
+    }
+}
+
+static unsigned int commands_array_len(command_data ** array)
+{
+    unsigned int len = 0;
+
+    command_data ** cmd;
+    cmd = array;
+
+    while (*cmd != NULL)
+    {
+        cmd++;
+        len++;
+    }
+
+    return len;
 }
 
 /*
@@ -104,6 +158,9 @@ Frees 2D array
 */
 static void free_2d(char ** array, size_t count)
 {
+    if (array == NULL)
+        return;
+
     for (size_t i = 0; i < count; ++i)
     {
         free(array[i]);
@@ -119,12 +176,16 @@ Frees 2D array
 */
 static void free_2d_null(char ** array)
 {
-    size_t i=0;
+    if (array == NULL)
+        return;
 
-    while (array[i] != NULL)
+    char ** str;
+    str = array;
+
+    while (*str != NULL)
     {
-        free(array[i]);
-        i++;
+        free(*str);
+        str++;
     }
 
     free(array);
@@ -132,17 +193,64 @@ static void free_2d_null(char ** array)
     array = NULL;
 }
 
-static char * pure_string(const char * str)
+/*static void save_command_2(command_data * command, FILE * fp)
 {
-    size_t len = strlen(str);
+    char ** argv;
+    argv = command->argv;
 
-    char * newstr = malloc((len-1) * sizeof(char));
-    strncpy(newstr, str+1, len-2);
-    newstr[len-2] = '\0';
+    while (*argv != NULL)
+    {
+        fwrite(argv, sizeof(char), strlen(*argv), fp);
+        argv++;
+    }
 
-    return newstr;
+    fwrite(command->runas_uid, sizeof(char), strlen(command->runas_uid), fp);
+    fwrite(command->runas_gid, sizeof(char), strlen(command->runas_gid), fp);
+
+    fwrite(command->user, sizeof(char), strlen(command->user), fp);
+    fwrite(command->home, sizeof(char), strlen(command->home), fp);
+    fwrite(command->path, sizeof(char), strlen(command->path), fp);
+    fwrite(command->pwd, sizeof(char), strlen(command->pwd), fp);
+
+    fwrite(command->auth_by_user, sizeof(char), strlen(command->auth_by_user), fp);
+}*/
+
+static int save_command(command_data * command, int fd)
+{
+    int result;
+    char ** argv;
+    argv = command->argv;
+
+    /*  Arguments count  */
+    unsigned int argc = str_array_len(command->argv);
+    result = (write(fd, &argc, 2) == 2);
+
+    /*  Arguments  */
+    while (*argv != NULL)
+    {
+        result &= save_string(*argv, fd);
+        argv++;
+    }
+
+    /*  Separator  */
+    unsigned int zero = 0;
+    result &= (write(fd, &zero, 1) == 1);
+
+    /*  Other data  */
+    result &= save_string(command->runas_uid, fd) &&
+              save_string(command->runas_gid, fd) &&
+              save_string(command->user, fd) &&
+              save_string(command->home, fd) &&
+              save_string(command->path, fd) &&
+              save_string(command->pwd, fd) &&
+              save_string(command->auth_by_user, fd);
+
+    return result;
 }
 
+/*
+Initialize empty command
+*/
 static command_data * make_command()
 {
     command_data * command;
@@ -160,46 +268,12 @@ static command_data * make_command()
     command->home = NULL;
     command->path = NULL;
     command->pwd = NULL;
+    command->auth_by_user = NULL;
+    command->rem_by_user = NULL;
 
     return command;
 }
 
-/*
-Compare 2 arrays
- 0 = same length
->0 = length of smaller 2nd array
-<0 = length of smaller 1st array
-*/
-
-static int cmp_command(command_data ** cmd1, command_data ** cmd2)
-{
-    int i = 0;
-
-    while (cmd1[i] != NULL && cmd2[i] != NULL)
-    {
-        i++;
-    }
-
-    /* Both arrays have same length */
-    if (cmd1[i] == cmd2[i])
-    {
-        return 0;
-    }
-    /* 2nd longer */
-    else if (cmd1[i] == NULL)
-    {
-        return -i;
-    }
-    /* 1st longer */
-    else //if (cmd2[i] == NULL)
-    {
-        return i;
-    }
-}
-
-/*
-Frees command
-*/
 static void free_command(command_data * command)
 {
     if (command == NULL)
@@ -212,6 +286,8 @@ static void free_command(command_data * command)
     free(command->home);
     free(command->path);
     free(command->pwd);
+    free(command->auth_by_user);
+    free(command->rem_by_user);
 
     free_2d_null(command->argv);
 
@@ -237,11 +313,56 @@ static void free_commands_null(command_data ** commands)
     commands = NULL;
 }
 
+static command_data ** remove_command(command_data ** array, command_data * cmd)
+{
+    if (array == NULL || cmd == NULL)
+        return NULL;
+
+    int count = commands_array_len(array);
+    int index = 0;
+
+    for (int i = 0; i < count; i++)
+    {
+        if (array[i] != cmd)
+        {
+            array[index] = array[i];
+            index++;
+        }
+    }
+
+    array[index] = NULL;
+
+    return array;
+}
+
+static command_data ** add_command(command_data ** array, command_data * command)
+{
+    if (array == NULL || command == NULL)
+        return NULL;
+
+    int count = commands_array_len(array) + 2;
+
+    command_data ** cmds;
+
+    if ( (cmds = realloc(array, count * sizeof(command_data*) )) == NULL )
+    {
+        return NULL;
+    }
+
+    cmds[count-2] = command;
+    cmds[count-1] = NULL;
+
+    return cmds;
+}
+
 /*
 Check if array contains string
 */
 static bool array_contains(const char * str, char ** array, size_t count)
 {
+    if (array == NULL || str == NULL)
+        return false;
+
     for (size_t i = 0; i < count; ++i)
     {
         if (strcmp(array[i], str) == 0)

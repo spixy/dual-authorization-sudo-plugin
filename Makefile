@@ -15,8 +15,8 @@ OUTPUT2=/usr/libexec/sudo
 CC=gcc
 
 # flags
-FLAGS=-std=gnu99 -lpam -lpam_misc -fPIC -shared
-DFLAGS=-Wall -Wextra -Wp,-D_FORTIFY_SOURCE=2 -O2
+FLAGS=-std=gnu99 -lpam -lpam_misc -fPIC -shared -O2
+DFLAGS=-Wall -Wextra -Wp,-D_FORTIFY_SOURCE=2
 
 build: ${TARGET}
 
