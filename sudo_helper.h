@@ -9,13 +9,16 @@
 #define PLUGIN_COMMANDS_TEMP_FILE       "/tmp/sudo_security_plugin_XXXXXX"
 #define BOTH_USERS_AUTHENTICATED        " "
 
-#define MAX_USER_LENGTH    32
-#define MAX_NUM_LENGTH      8
-#define AUTH_USERS          2
+#define MAX_USER_LENGTH        32
+#define MAX_NUM_LENGTH          8
+#define AUTH_USERS              2
 
-#define FILTER_NOT_AUTH     0
-#define FILTER_AUTH_ME      1
-#define FILTER_AUTH_NOT_ME  2
+#define FILTER_NOT_AUTH         0
+#define FILTER_AUTH_ME          1
+#define FILTER_AUTH_NOT_ME      2
+#define FILTER_NOT_REM          3
+#define FILTER_REM_ME           4
+#define FILTER_REM_NOT_ME       5
 
 /*#ifdef __TANDEM
 # define ROOT_UID       65535
@@ -90,6 +93,11 @@ Check if strings starts with substring
 static bool str_starts(const char * a, const char * b)
 {
     return (strncmp(a, b, strlen(b)) == 0);
+}
+
+static bool str_case_starts(const char * a, const char * b)
+{
+    return (strncasecmp(a, b, strlen(b)) == 0);
 }
 
 /*
@@ -243,7 +251,8 @@ static int save_command(command_data * command, int fd)
               save_string(command->home, fd) &&
               save_string(command->path, fd) &&
               save_string(command->pwd, fd) &&
-              save_string(command->auth_by_user, fd);
+              save_string(command->auth_by_user, fd) &&
+              save_string(command->rem_by_user, fd);
 
     return result;
 }
