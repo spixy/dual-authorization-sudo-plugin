@@ -1,19 +1,3 @@
-/*
-* Copyright (c) 2010-2013 Todd C. Miller <Todd.Miller@courtesan.com>
-*
-* Permission to use, copy, modify, and distribute this software for any
-* purpose with or without fee is hereby granted, provided that the above
-* copyright notice and this permission notice appear in all copies.
-*
-* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-*/
-
 #define _GNU_SOURCE
 
 #include <ctype.h>
@@ -34,7 +18,6 @@
 #include <linux/limits.h>
 
 #include <security/pam_appl.h>
-#include <security/pam_misc.h>
 #include <security/pam_modules.h>
 #include <security/_pam_macros.h>
 
@@ -50,29 +33,35 @@
 static struct plugin_state plugin_state;
 static sudo_conv_t sudo_conv;
 static sudo_printf_t sudo_log;
-static uid_t runas_uid;
-static gid_t runas_gid;
+static uid_t runas_uid = NULL;
+static gid_t runas_gid = NULL;
 static const char * runas_user = NULL;
 static const char * runas_group = NULL;
-static char * user;
-static char * cwd;
+static char * user = NULL;
+static char * pwd = NULL;
+static char * cwd = NULL;
+static char * prompt = NULL;
 static int use_sudoedit = false;
 
-
-static char ** load_users();
-
+static char ** load_config();
 static int copy_file(int fd, char * to);
 
 static void print_command(command_data * command, int full);
-static command_data ** load();
 static command_data * load_command(FILE * fp);
+static command_data ** load();
 static command_data ** filter_commands(command_data ** commands, int filter);
 static int save(command_data ** commands);
 static int save_command(command_data * command, int fd);
 static int append_command(char ** argv);
 
-static int check_passwd(const char* user);
+static int check_passwd(const char* auth_user);
 static int check_pam_result(int result);
+static int PAM_conv (int, const struct pam_message**, struct pam_response**, void*);
+static struct pam_conv PAM_converse =
+{
+    PAM_conv,
+    NULL
+};
 
 static char ** build_envp(command_data * command);
 static int execute(command_data * command);
@@ -104,9 +93,10 @@ static void print_command(command_data * command, int full)
 }
 
 /*
-Reads user names from conf file
+Reads data from conf file
+returns users
 */
-static char ** load_users()
+static char ** load_config()
 {
     FILE * fp;
     char ** users;
@@ -140,6 +130,13 @@ static char ** load_users()
             // ignore empty lines and comments
             if (len > 0 && buffer[0] != '#')
             {
+                // load prompt
+                if (str_case_starts(buffer, "prompt ") && (size_t)len > strlen("prompt "))
+                {
+                    prompt = strdup(buffer + strlen("prompt "));
+                    continue;
+                }
+
                 // maximum user count loaded
                 if (usercount == AUTH_USERS)
                 {
@@ -213,7 +210,7 @@ static char ** load_users()
     free(buffer);
 
     // check if it loaded needed user count
-    if (usercount == AUTH_USERS)
+    if (usercount < AUTH_USERS)
     {
         free_2d(users, AUTH_USERS);
         sudo_log(SUDO_CONV_ERROR_MSG, "not enough users set in %s (minimum is %d)\n", STR(PLUGIN_CONF_FILE) , AUTH_USERS);
@@ -356,6 +353,8 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
     plugin_state.settings = settings;
     plugin_state.user_info = user_info;
 
+    prompt = strdup("#"); // default prompt
+
     /* Create plugin directory in /etc */
     struct stat st = {0};
 
@@ -395,8 +394,6 @@ static void sudo_close (int exit_status, int error)
 
 /*
 The show_version() function is called by sudo when the user specifies the -V option.
-The plugin displays its version information to the user.
-If the user requests detailed version information, the verbose flag will be set.
 */
 static int sudo_show_version (int verbose)
 {
@@ -408,7 +405,7 @@ static int sudo_show_version (int verbose)
         sudo_log(SUDO_CONV_INFO_MSG, "Conf file path: %s\n", STR(PLUGIN_CONF_FILE));
         sudo_log(SUDO_CONV_INFO_MSG, "Authorities:\n");
 
-        char ** users = load_users();
+        char ** users = load_config();
         int i = 0;
 
         if (users == NULL)
@@ -428,7 +425,7 @@ static int sudo_show_version (int verbose)
 }
 
 /*
-Copy temp file (fd) to PLUGIN_COMMANDS_FILE
+Copy file (fd)
 */
 static int copy_file(int fd, char * to)
 {
@@ -453,6 +450,9 @@ static int copy_file(int fd, char * to)
     return true;
 }
 
+/*
+Save all commands to file
+*/
 static int save(command_data ** commands)
 {
     int fd;
@@ -502,6 +502,9 @@ static int save(command_data ** commands)
     return result;
 }
 
+/*
+Load string from file
+*/
 static char * load_string(FILE * fp)
 {
     unsigned char int_buffer[2];
@@ -530,9 +533,19 @@ static char * load_string(FILE * fp)
         return NULL;
     }
 
+    /* Checking length */
+    if (len != strlen(str)+1)
+    {
+        free(str);
+        return NULL;
+    }
+
     return str;
 }
 
+/*
+Load next command from file
+*/
 static command_data * load_command(FILE * fp)
 {
     unsigned char int_buffer[2];
@@ -592,6 +605,9 @@ static command_data * load_command(FILE * fp)
     return command;
 }
 
+/*
+Load all commands from file
+*/
 static command_data ** load()
 {
     FILE * fp;
@@ -640,6 +656,9 @@ static command_data ** load()
     return cmds;
 }
 
+/*
+Get all commands that meets condition based on filter
+*/
 static command_data ** filter_commands(command_data ** commands, int filter)
 {
     if (commands == NULL)
@@ -711,6 +730,10 @@ static int check_pam_result(int result)
             sudo_log(SUDO_CONV_ERROR_MSG, "the modules were not able to access the authentication information\n");
             return false;
 
+        case PAM_BAD_ITEM:
+            sudo_log(SUDO_CONV_ERROR_MSG, "attempted to set an undefined or inaccessible item\n");
+            return false;
+
         case PAM_BUF_ERR:
             sudo_log(SUDO_CONV_ERROR_MSG, "memory buffer error\n");
             return false;
@@ -750,36 +773,34 @@ static int check_pam_result(int result)
 }
 
 /*
-Authorize user via PAM
+PAM conversation
 */
-static int check_passwd(const char* user) // PAM zatim nefunguje (PAM_AUTH_ERR)
+static int PAM_conv(int num_msg, const struct pam_message **msg, struct pam_response **resp, void *appdata_ptr)
 {
-    return true;
-    /*struct sudo_conv_message msg;
-    struct sudo_conv_reply repl;
-    char message[MAX_USER_LENGTH + 11];
+    struct pam_response * reply = NULL;
 
-    strcpy(message, user);
-    strcat(message, " password:");
+    reply = (struct pam_response *) malloc(sizeof(struct pam_response) * num_msg);
 
-    memset(&msg, 0, sizeof(msg));
-    //msg.msg_type = SUDO_CONV_PROMPT_ECHO_OFF;
-    msg.msg_type = SUDO_CONV_PROMPT_ECHO_ON; // testing
-    msg.msg = message;
+    if (!reply)
+        return PAM_CONV_ERR;
 
-    / * Show message * /
-    memset(&repl, 0, sizeof(repl));
-    sudo_conv(1, &msg, &repl);*/
+    reply[0].resp = strdup(pwd);
+    reply[0].resp_retcode = 0;
 
-    struct pam_conv pamc;
+    *resp = reply;
+
+    return PAM_SUCCESS;
+}
+
+/*
+Authorise user via PAM
+*/
+static int check_passwd(const char* auth_user)
+{
     pam_handle_t * pamh = NULL;
 
-    pamc.conv = &misc_conv;
-    pamc.appdata_ptr = NULL;
-
     /* Initialize PAM */
-    int result = pam_start("sudo-security-plugin", user, &pamc, &pamh);
-    sudo_log(SUDO_CONV_ERROR_MSG, "pam_start: %d\n",result);
+    int result = pam_start("sudo", auth_user, &PAM_converse, &pamh);
 
     if (!check_pam_result(result))
     {
@@ -787,19 +808,25 @@ static int check_passwd(const char* user) // PAM zatim nefunguje (PAM_AUTH_ERR)
         return false;
     }
 
-    /*pwd = repl.reply;
+    /* Get password from user */
+    struct sudo_conv_message msgs[1];
+    char * msg = NULL;
+    msgs[0].msg_type = SUDO_CONV_PROMPT_MASK;
 
-    if ((reply = (struct pam_response *) malloc(sizeof(struct pam_response))) == NULL)
+    if (asprintf(&msg, "%s password:", auth_user) == -1)
+    {
         return false;
+    }
+    msgs[0].msg = msg;
 
-    reply[0].resp = strdup(pwd);
-    reply[0].resp_retcode = 0;
+    struct sudo_conv_reply replies[1];
+    sudo_conv(1, msgs, replies);
 
-    pam_set_item(pamh, PAM_AUTHTOK, strdup(pwd));*/
+    pwd = strdup(replies[0].reply);
+    free(msg);
 
     /* Authenticate user  */
-    result = pam_authenticate(pamh, 0);  // user have to be password protected
-    sudo_log(SUDO_CONV_ERROR_MSG, "pam_authenticate: %d\n",result);
+    result = pam_authenticate(pamh, 0);  // possible PAM_DISALLOW_NULL_AUTHTOK
 
     if (!check_pam_result(result))
     {
@@ -809,7 +836,6 @@ static int check_passwd(const char* user) // PAM zatim nefunguje (PAM_AUTH_ERR)
 
     /* Check for account validation */
     result = pam_acct_mgmt(pamh, 0);
-    sudo_log(SUDO_CONV_ERROR_MSG, "pam_acct_mgmt: %d\n",result);
 
     if (!check_pam_result(result))
     {
@@ -826,7 +852,7 @@ Execute command
 */
 static int execute(command_data * command)
 {
-    sudo_log(SUDO_CONV_INFO_MSG, ">> ");
+    sudo_log(SUDO_CONV_INFO_MSG, prompt);
     print_command(command, false);
 
     pid_t pid;
@@ -879,6 +905,27 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
     if ((argc > 0) && (strcmp(argv[0],"apply-all") == 0 || strcmp(argv[0], "aa") == 0))
     {
+        /* Authorise as other user */
+        if (argc == 2)
+        {
+            if (getpwnam(argv[1]) == NULL)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", argv[1]);
+                return -1;
+            }
+            user = argv[1];
+        }
+
+        /* Is user allowed to authorise */
+        char ** users = load_config();
+        if (!array_contains(user, users, AUTH_USERS))
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "user %s cannot authorise executing commands\n", user);
+            free_2d(users, AUTH_USERS);
+            return 0;
+        }
+        free_2d(users, AUTH_USERS);
+
         int i, result, i_exec = -1;
         command_data ** cmds = load();
 
@@ -948,10 +995,16 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             {
                 cmds = remove_command(cmds, cmds_auth_not_me[i]);
             }
+            else if (cmds_auth_not_me[i]->sudoedit)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "cannot execute command ");
+                print_command(cmds_auth_not_me[i], false);
+                // dont break
+            }
             else /* Error in executing command, stopping execution of all commands */
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "cannot execute command ");
-                //print_command(cmds_auth_not_me[i], true);
+                print_command(cmds_auth_not_me[i], false);
                 i_exec = i;
                 break;
             }
@@ -990,7 +1043,28 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
     }
     else if ((argc > 0) && (strcmp(argv[0],"clear-all") == 0 || strcmp(argv[0], "ca") == 0))
     {
-        int i, result, i_exec = -1;
+        /* Authorise as other user */
+        if (argc == 2)
+        {
+            if (getpwnam(argv[1]) == NULL)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", argv[1]);
+                return -1;
+            }
+            user = argv[1];
+        }
+
+        /* Is user allowed to authorise */
+        char ** users = load_config();
+        if (!array_contains(user, users, AUTH_USERS))
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "user %s cannot authorise to clear commands\n", user);
+            free_2d(users, AUTH_USERS);
+            return 0;
+        }
+        free_2d(users, AUTH_USERS);
+
+        int i, result;
         command_data ** cmds = load();
 
         /* No commands found */
@@ -1090,7 +1164,10 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         char * orig_file = basename(orig_file_path);
         char * temp_file;
 
-        asprintf(&temp_file,"/tmp/%s", orig_file);
+        if (asprintf(&temp_file,"/tmp/%s", orig_file))
+        {
+            return false;
+        }
 
         /* Copy to tmp */
         int fd = open(orig_file_path, O_RDWR, S_IWUSR | S_IRUSR);
@@ -1214,7 +1291,7 @@ static int sudo_list(int argc, char * const argv[], int verbose, const char *lis
     {
         sudo_log(SUDO_CONV_INFO_MSG, "Authorities:\n");
 
-        char ** users = load_users();
+        char ** users = load_config();
         int i = 0;
 
         if (users == NULL)

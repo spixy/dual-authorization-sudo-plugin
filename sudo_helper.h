@@ -13,12 +13,12 @@
 #define MAX_NUM_LENGTH          8
 #define AUTH_USERS              2
 
-#define FILTER_NOT_AUTH         0
-#define FILTER_AUTH_ME          1
-#define FILTER_AUTH_NOT_ME      2
-#define FILTER_NOT_REM          3
-#define FILTER_REM_ME           4
-#define FILTER_REM_NOT_ME       5
+#define FILTER_NOT_AUTH         0   // not authorized commands (to execute)
+#define FILTER_AUTH_ME          1   // commands authorized by me (to execute)
+#define FILTER_AUTH_NOT_ME      2   // commands authorized by second user (to execute)
+#define FILTER_NOT_REM          3   // not authorized commands (to remove from queue)
+#define FILTER_REM_ME           4   // commands authorized by me (to remove from queue)
+#define FILTER_REM_NOT_ME       5   // commands authorized by second user (to remove from queue)
 
 /*#ifdef __TANDEM
 # define ROOT_UID       65535
@@ -59,6 +59,7 @@ typedef struct _command_data
     char * pwd;
     char * auth_by_user;
     char * rem_by_user;
+    int sudoedit;
 } command_data;
 
 
@@ -145,6 +146,9 @@ static int save_string(char * str, int fd)
     }
 }
 
+/*
+Array size
+*/
 static unsigned int commands_array_len(command_data ** array)
 {
     unsigned int len = 0;
@@ -223,6 +227,9 @@ static void free_2d_null(char ** array)
     fwrite(command->auth_by_user, sizeof(char), strlen(command->auth_by_user), fp);
 }*/
 
+/*
+Save command to binary file
+*/
 static int save_command(command_data * command, int fd)
 {
     int result;
@@ -279,6 +286,7 @@ static command_data * make_command()
     command->pwd = NULL;
     command->auth_by_user = NULL;
     command->rem_by_user = NULL;
+    command->sudoedit = false;
 
     return command;
 }
