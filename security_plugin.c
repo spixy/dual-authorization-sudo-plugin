@@ -37,19 +37,19 @@ static uid_t runas_uid = NULL;
 static gid_t runas_gid = NULL;
 static const char * runas_user = NULL;
 static const char * runas_group = NULL;
+static char ** users;
 static char * user = NULL;
 static char * pwd = NULL;
 static char * cwd = NULL;
 static char * prompt = NULL;
 static int use_sudoedit = false;
 
-static char ** load_config();
+static int load_config();
 static int copy_file(int fd, char * to);
 
 static void print_command(command_data * command, int full);
 static command_data * load_command(FILE * fp);
 static command_data ** load();
-static command_data ** filter_commands(command_data ** commands, int filter);
 static int save(command_data ** commands);
 static int save_command(command_data * command, int fd);
 static int append_command(char ** argv);
@@ -96,15 +96,14 @@ static void print_command(command_data * command, int full)
 Reads data from conf file
 returns users
 */
-static char ** load_config()
+static int load_config()
 {
     FILE * fp;
-    char ** users;
 
     if ( (users = malloc( (AUTH_USERS+1) * sizeof(char*))) == NULL)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
-        return NULL;
+        return false;
     }
     users[AUTH_USERS] = NULL;
 
@@ -112,7 +111,7 @@ static char ** load_config()
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "%s not found\n", STR(PLUGIN_CONF_FILE));
         free(users);
-        return NULL;
+        return false;
     }
 
     size_t usercount = 0;
@@ -133,6 +132,7 @@ static char ** load_config()
                 // load prompt
                 if (str_case_starts(buffer, "prompt ") && (size_t)len > strlen("prompt "))
                 {
+                    free(prompt);
                     prompt = strdup(buffer + strlen("prompt "));
                     continue;
                 }
@@ -144,8 +144,7 @@ static char ** load_config()
                     free(buffer);
                     sudo_log(SUDO_CONV_ERROR_MSG, "too many users stored in %s (maximum is %d)\n", STR(PLUGIN_CONF_FILE), AUTH_USERS);
                     free_2d(users, AUTH_USERS);
-                    return NULL;
-                    //return users;
+                    return false;
                 }
 
                 // parsing "user xxx"
@@ -214,12 +213,10 @@ static char ** load_config()
     {
         free_2d(users, AUTH_USERS);
         sudo_log(SUDO_CONV_ERROR_MSG, "not enough users set in %s (minimum is %d)\n", STR(PLUGIN_CONF_FILE) , AUTH_USERS);
-        return NULL;
+        return false;
     }
-    else
-    {
-        return users;
-    }
+
+    return true;
 }
 
 /*
@@ -294,13 +291,6 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
             break;
         }
 
-        /*#if !defined(HAVE_GETPROGNAME) && !defined(HAVE___PROGNAME)
-        if (strncmp(*ui, "progname=", sizeof("progname=") - 1) == 0)
-        {
-            setprogname(*ui + sizeof("progname=") - 1);
-        }
-        #endif*/
-
         // Check to see if sudo was called as sudoedit or with -e flag
         if (str_case_starts(*ui, "sudoedit=true"))  //(strncmp(*ui, "sudoedit=", sizeof("sudoedit=") - 1) == 0)
         {
@@ -353,7 +343,10 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
     plugin_state.settings = settings;
     plugin_state.user_info = user_info;
 
-    prompt = strdup("#"); // default prompt
+    /* Default prompt */
+    prompt = strdup("#");
+
+    load_config();
 
     /* Create plugin directory in /etc */
     struct stat st = {0};
@@ -372,6 +365,8 @@ Sudo_close() is called when the command being run by sudo finishes.
 */
 static void sudo_close (int exit_status, int error)
 {
+    free_2d(users, AUTH_USERS);
+
     /* The policy might log the command exit status here. */
     if (error)
     {
@@ -405,7 +400,7 @@ static int sudo_show_version (int verbose)
         sudo_log(SUDO_CONV_INFO_MSG, "Conf file path: %s\n", STR(PLUGIN_CONF_FILE));
         sudo_log(SUDO_CONV_INFO_MSG, "Authorities:\n");
 
-        char ** users = load_config();
+        load_config();
         int i = 0;
 
         if (users == NULL)
@@ -584,15 +579,8 @@ static command_data * load_command(FILE * fp)
 
         command->argv[i] = str;
     }
+
     command->argv[argc] = NULL;
-
-    /* Separator */
-    if ( fread(int_buffer, 1, 1, fp) != 1 || int_buffer[0] != 0 )
-    {
-        free_command(command);
-        return NULL;
-    }
-
     command->runas_uid = load_string(fp);
     command->runas_gid = load_string(fp);
     command->user = load_string(fp);
@@ -619,10 +607,8 @@ static command_data ** load()
         return NULL;
     }
 
-    int debug;
-
     /* Commands count */
-    if ((debug = fread(int_buffer, 2, 1, fp)) != 1)
+    if (fread(int_buffer, 2, 1, fp) != 1)
     {
         fclose(fp);
         return NULL;
@@ -657,51 +643,36 @@ static command_data ** load()
 }
 
 /*
-Get all commands that meets condition based on filter
+Save command to binary file
 */
-static command_data ** filter_commands(command_data ** commands, int filter)
+static int save_command(command_data * command, int fd)
 {
-    if (commands == NULL)
-        return NULL;
+    int result;
+    char ** argv;
+    argv = command->argv;
 
-    command_data ** cmds;
-    command_data ** more_cmds;
-    unsigned int count = 1;
+    /*  Arguments count  */
+    unsigned int argc = str_array_len(command->argv);
+    result = (write(fd, &argc, 2) == 2);
 
-    if ( (cmds = malloc( count * sizeof(command_data*) )) == NULL )
+    /*  Arguments  */
+    while (*argv != NULL)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
-        return NULL;
+        result &= save_string(*argv, fd);
+        argv++;
     }
 
-    int i = 0;
-    while (commands[i] != NULL)
-    {
-        if ( (filter == FILTER_NOT_AUTH && commands[i]->auth_by_user == NULL) ||
-             (filter == FILTER_AUTH_ME && commands[i]->auth_by_user != NULL && strcmp(commands[i]->auth_by_user, user) == 0) ||
-             (filter == FILTER_AUTH_NOT_ME && commands[i]->auth_by_user != NULL && strcmp(commands[i]->auth_by_user, user) != 0) ||
-             (filter == FILTER_NOT_REM && commands[i]->rem_by_user == NULL) ||
-             (filter == FILTER_REM_ME && commands[i]->rem_by_user != NULL && strcmp(commands[i]->rem_by_user, user) == 0) ||
-             (filter == FILTER_REM_NOT_ME && commands[i]->rem_by_user != NULL && strcmp(commands[i]->rem_by_user, user) != 0))
-        {
-            cmds[count-1] = commands[i];
-            count++;
+    /*  Other data  */
+    result &= save_string(command->runas_uid, fd) &&
+              save_string(command->runas_gid, fd) &&
+              save_string(command->user, fd) &&
+              save_string(command->home, fd) &&
+              save_string(command->path, fd) &&
+              save_string(command->pwd, fd) &&
+              save_string(command->auth_by_user, fd) &&
+              save_string(command->rem_by_user, fd);
 
-            if ( (more_cmds = realloc(cmds, count * sizeof(command_data*) )) == NULL )
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
-                free(cmds);
-                return NULL;
-            }
-
-            cmds = more_cmds;
-        }
-        i++;
-    }
-
-    cmds[count-1] = NULL;
-
-    return cmds;
+    return result;
 }
 
 /*
@@ -880,7 +851,9 @@ static int execute(command_data * command)
         {
             return false;
         }
+
         exit(0);
+        //return true;
     }
     else /* for the parent  */
     {
@@ -899,256 +872,158 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 {
     if (!argc || argv[0] == NULL)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "no command specified\n");
+        sudo_log(SUDO_CONV_ERROR_MSG, "No command specified\n");
         return -1;
     }
 
-    if ((argc > 0) && (strcmp(argv[0],"apply-all") == 0 || strcmp(argv[0], "aa") == 0))
+    if ((argc > 0) && (strcmp(argv[0],"list") == 0 || strcmp(argv[0], "la") == 0))
     {
-        /* Authorise as other user */
-        if (argc == 2)
-        {
-            if (getpwnam(argv[1]) == NULL)
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", argv[1]);
-                return -1;
-            }
-            user = argv[1];
-        }
-
-        /* Is user allowed to authorise */
-        char ** users = load_config();
-        if (!array_contains(user, users, AUTH_USERS))
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "user %s cannot authorise executing commands\n", user);
-            free_2d(users, AUTH_USERS);
-            return 0;
-        }
-        free_2d(users, AUTH_USERS);
-
-        int i, result, i_exec = -1;
         command_data ** cmds = load();
 
         /* No commands found */
         if (cmds == NULL || cmds[0] == NULL)
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "no commands found.\n");
+            sudo_log(SUDO_CONV_ERROR_MSG, "No commands found\n");
             free_commands_null(cmds);
             return -1;
         }
 
-        command_data ** cmds_not_auth    = filter_commands(cmds, FILTER_NOT_AUTH);    // to authenticate
-        command_data ** cmds_auth_me     = filter_commands(cmds, FILTER_AUTH_ME);     // nothing
-        command_data ** cmds_auth_not_me = filter_commands(cmds, FILTER_AUTH_NOT_ME); // to execute
-
-        if (cmds_not_auth == NULL || cmds_auth_me == NULL || cmds_auth_not_me == NULL)
+        int i = 0;
+        while (cmds[i] != NULL)
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "allocation error\n");
-            free_commands_null(cmds);
-            return -1;
-        }
-
-        sudo_log(SUDO_CONV_INFO_MSG, "Commands already authenticated:\n");
-        i = 0;
-        while (cmds_auth_me[i] != NULL)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%d: ", i+1);
-            print_command(cmds_auth_me[i], false);
+            print_command(cmds[i], false);
             i++;
         }
 
-        sudo_log(SUDO_CONV_INFO_MSG, "\nCommands to authenticate:\n");
-        i = 0;
-        while (cmds_not_auth[i] != NULL)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%d: ", i+1);
-            print_command(cmds_not_auth[i], false);
-            i++;
-        }
-
-        sudo_log(SUDO_CONV_INFO_MSG, "\nCommands to execute:\n");
-        i = 0;
-        while (cmds_auth_not_me[i] != NULL)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%d: ", i+1);
-            print_command(cmds_auth_not_me[i], false);
-            i++;
-        }
-        sudo_log(SUDO_CONV_INFO_MSG, "\n");
-
-
-        /* Authenticate user */
-        if (! check_passwd(user))
-        {
-            free_commands_null(cmds);
-            free(cmds_not_auth);
-            free(cmds_auth_me);
-            free(cmds_auth_not_me);
-            return -1;
-        }
-
-        /* Run all commands */
-        i = 0;
-        while (cmds_auth_not_me[i] != NULL)
-        {
-            if (execute(cmds_auth_not_me[i]))
-            {
-                cmds = remove_command(cmds, cmds_auth_not_me[i]);
-            }
-            else if (cmds_auth_not_me[i]->sudoedit)
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "cannot execute command ");
-                print_command(cmds_auth_not_me[i], false);
-                // dont break
-            }
-            else /* Error in executing command, stopping execution of all commands */
-            {
-                sudo_log(SUDO_CONV_ERROR_MSG, "cannot execute command ");
-                print_command(cmds_auth_not_me[i], false);
-                i_exec = i;
-                break;
-            }
-            i++;
-        }
-
-        /* Set auth commands */
-        i = 0;
-        while (cmds_not_auth[i] != NULL)
-        {
-            cmds_not_auth[i]->auth_by_user = strdup(user);
-            i++;
-        }
-
-        if (i_exec >= 0) /* Mark failed commands as authed by both users */
-        {
-            i = i_exec;
-            while (cmds_auth_not_me[i] != NULL)
-            {
-                free(cmds_auth_not_me[i]->auth_by_user);
-                cmds_auth_not_me[i]->auth_by_user = strdup(BOTH_USERS_AUTHENTICATED);
-                i++;
-            }
-        }
-
-        if (!save(cmds))
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "cannot save commands");
-        }
-
-        free(cmds_not_auth);
-        free(cmds_auth_me);
-        free(cmds_auth_not_me);
         free_commands_null(cmds);
+
         return 0;
     }
-    else if ((argc > 0) && (strcmp(argv[0],"clear-all") == 0 || strcmp(argv[0], "ca") == 0))
+    else if (argc > 0 && strcmp(argv[0],"auth") == 0)
     {
         /* Authorise as other user */
         if (argc == 2)
         {
             if (getpwnam(argv[1]) == NULL)
             {
-                sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", argv[1]);
+                sudo_log(SUDO_CONV_ERROR_MSG, "User %s not found\n", argv[1]);
                 return -1;
             }
             user = argv[1];
         }
 
         /* Is user allowed to authorise */
-        char ** users = load_config();
         if (!array_contains(user, users, AUTH_USERS))
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "user %s cannot authorise to clear commands\n", user);
-            free_2d(users, AUTH_USERS);
+            sudo_log(SUDO_CONV_ERROR_MSG, "User %s cannot authorise executing commands\n", user);
             return 0;
         }
-        free_2d(users, AUTH_USERS);
 
-        int i, result;
         command_data ** cmds = load();
 
         /* No commands found */
         if (cmds == NULL || cmds[0] == NULL)
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "no commands found.\n");
+            sudo_log(SUDO_CONV_ERROR_MSG, "No commands found\n");
             free_commands_null(cmds);
             return -1;
         }
-
-        command_data ** cmds_not_auth    = filter_commands(cmds, FILTER_NOT_REM);    // to authenticate
-        command_data ** cmds_auth_me     = filter_commands(cmds, FILTER_REM_ME);     // nothing
-        command_data ** cmds_auth_not_me = filter_commands(cmds, FILTER_REM_NOT_ME); // to clear
-
-        if (cmds_not_auth == NULL || cmds_auth_me == NULL || cmds_auth_not_me == NULL)
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "allocation error\n");
-            free_commands_null(cmds);
-            return -1;
-        }
-
-        sudo_log(SUDO_CONV_INFO_MSG, "Commands already authenticated:\n");
-        i = 0;
-        while (cmds_auth_me[i] != NULL)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%d: ", i+1);
-            print_command(cmds_auth_me[i], false);
-            i++;
-        }
-
-        sudo_log(SUDO_CONV_INFO_MSG, "\nCommands to authenticate:\n");
-        i = 0;
-        while (cmds_not_auth[i] != NULL)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%d: ", i+1);
-            print_command(cmds_not_auth[i], false);
-            i++;
-        }
-
-        sudo_log(SUDO_CONV_INFO_MSG, "\nCommands to remove:\n");
-        i = 0;
-        while (cmds_auth_not_me[i] != NULL)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%d: ", i+1);
-            print_command(cmds_auth_not_me[i], false);
-            i++;
-        }
-        sudo_log(SUDO_CONV_INFO_MSG, "\n");
 
         /* Authenticate user */
         if (! check_passwd(user))
         {
             free_commands_null(cmds);
-            free(cmds_not_auth);
-            free(cmds_auth_me);
-            free(cmds_auth_not_me);
             return -1;
         }
 
-        /* Remove commands */
-        i = 0;
-        while (cmds_auth_not_me[i] != NULL)
-        {
-            cmds = remove_command(cmds, cmds_auth_not_me[i]);
-            i++;
-        }
+        /* Prepare conversation */
+        struct sudo_conv_message msgs[1];
+        struct sudo_conv_reply replies[1];
 
-        /* Set auth commands */
-        i = 0;
-        while (cmds_not_auth[i] != NULL)
+        char * msg = strdup("Execute, skip or remove? [e/s/r]:");
+        msgs[0].msg_type = SUDO_CONV_PROMPT_ECHO_OFF;
+        msgs[0].msg = msg;
+
+        int i = 0;
+        while (cmds[i] != NULL)
         {
-            cmds_not_auth[i]->rem_by_user = strdup(user);
-            i++;
+            sudo_log(SUDO_CONV_ERROR_MSG, "%d: ", i);
+            print_command(cmds[i], false);
+
+            sudo_conv(1, msgs, replies);
+
+            /* Execute */
+            if (strcasecmp(replies[0].reply,"e") == 0)
+            {
+                if (cmds[i]->auth_by_user == NULL)
+                {
+                    // set me as authorized user
+                    cmds[i]->auth_by_user = strdup(user);
+                    i++;
+                }
+                else if (strcmp(cmds[i]->auth_by_user, user) == 0)
+                {
+                    // already authorized by me
+                    i++;
+                    sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorized, skipping\n");
+                }
+                else
+                {
+                    cmds[i]->auth_by_user = strdup(BOTH_USERS_AUTHENTICATED);
+
+                    // execute
+                    if (execute(cmds[i]))
+                    {
+                        cmds = remove_command(cmds, cmds[i]);
+                    }
+                    else
+                    {
+                        i++;
+                        sudo_log(SUDO_CONV_ERROR_MSG, "Error in command execution, skipping\n");
+                    }
+                }
+            }
+            /* Remove from list */
+            else if (strcasecmp(replies[0].reply,"r") == 0)
+            {
+                if (cmds[i]->rem_by_user == NULL)
+                {
+                    // set me as authorized user
+                    cmds[i]->rem_by_user = strdup(user);
+                    i++;
+                }
+                else if (strcmp(cmds[i]->rem_by_user, user) == 0)
+                {
+                    // already authorized by me
+                    i++;
+                    sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorized, skipping\n");
+                }
+                else
+                {
+                    // remove from list
+                    cmds = remove_command(cmds, cmds[i]);
+                }
+            }
+            /* Skip */
+            else if (strcasecmp(replies[0].reply,"s") == 0)
+            {
+                i++;
+            }
+            /* Quit */
+            else if (strcasecmp(replies[0].reply,"q") == 0)
+            {
+                break;
+            }
         }
 
         if (!save(cmds))
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "cannot save commands");
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot save commands");
         }
 
-        free(cmds_not_auth);
-        free(cmds_auth_me);
-        free(cmds_auth_not_me);
+        free(msg);
         free_commands_null(cmds);
+
         return 0;
     }
     else if (use_sudoedit)
@@ -1160,30 +1035,34 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         // wait for close editor
         // save command: "mv -f -T /tmp/yyy xxx"
 
-        char * orig_file_path = argv[1];
-        char * orig_file = basename(orig_file_path);
-        char * temp_file;
+        char * editor = find_editor(plugin_state.envp);
 
-        if (asprintf(&temp_file,"/tmp/%s", orig_file))
+        char * pwd = getenv("PWD");
+        char * orig_file = basename(argv[1]);
+        char * orig_file_path;
+        char * temp_file_path;
+
+        if (asprintf(&orig_file_path, "%s/%s", pwd, orig_file) == -1 ||
+            asprintf(&temp_file_path,"/tmp/%s", orig_file) == -1)
         {
             return false;
         }
 
         /* Copy to tmp */
         int fd = open(orig_file_path, O_RDWR, S_IWUSR | S_IRUSR);
-        copy_file(fd, temp_file);
+        copy_file(fd, temp_file_path);
         close(fd);
 
         /* Run text editor */
         command_data * cmd = make_command();
         cmd->argv = malloc(3 * sizeof(char*));
-        cmd->argv[0] = strdup("/bin/vim");
-        cmd->argv[1] = strdup(temp_file);
+        cmd->argv[0] = editor;
+        cmd->argv[1] = strdup(temp_file_path);
         cmd->argv[2] = NULL;
         cmd->user = getenv("USER");
         cmd->home = getenv("HOME");
         cmd->path = getenv("PATH");
-        cmd->pwd  = getenv("PWD");
+        cmd->pwd  = pwd;
         execute(cmd);
 
         /* Save command */
@@ -1191,7 +1070,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         new_argv[0] = strdup("mv");
         new_argv[1] = strdup("-f");
         new_argv[2] = strdup("-T");
-        new_argv[3] = strdup(temp_file);
+        new_argv[3] = strdup(temp_file_path);
         new_argv[4] = strdup(orig_file_path);
         new_argv[5] = NULL;
 
@@ -1218,23 +1097,23 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
 static int append_command(char ** argv)
 {
-        int result;
-        command_data * command = make_command();
-        command->argv = argv;
-        command->user = getenv("USER");
-        command->home = getenv("HOME");
-        command->path = getenv("PATH");
-        command->pwd  = getenv("PWD");
+    int result;
+    command_data * command = make_command();
+    command->argv = argv;
+    command->user = getenv("USER");
+    command->home = getenv("HOME");
+    command->path = getenv("PATH");
+    command->pwd  = getenv("PWD");
 
-        /* Load commands from file */
-        command_data ** cmds = load();
-        command_data ** cmds_save;
+    /* Load commands from file */
+    command_data ** cmds = load();
+    command_data ** cmds_save;
 
-        if (cmds != NULL)
-        {
+    if (cmds != NULL)
+    {
             if ((cmds_save = add_command(cmds, command)) == NULL)
             {
-                sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
+                sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data\n");
                 free_commands_null(cmds);
                 return -1;
             }
@@ -1247,12 +1126,12 @@ static int append_command(char ** argv)
             cmds_save[count-1] = NULL;
 
             free_commands_null(cmds_save);
-        }
-        else
-        {
+    }
+    else
+    {
             if ( (cmds_save = malloc(2 * sizeof(command_data*))) == NULL )
             {
-                sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
+                sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data\n");
                 free_commands_null(cmds);
                 return -1;
             }
@@ -1263,18 +1142,17 @@ static int append_command(char ** argv)
             result = save(cmds_save);
 
             free(cmds_save);
-        }
+    }
 
-        if (result)
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "Command saved\n");
-            return 0;
-        }
-        else
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "cannot save command\n");
-            return -1;
-        }
+    if (result)
+    {
+        return 0;
+    }
+    else
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Command was not saved\n");
+        return -1;
+    }
 }
 
 /*
@@ -1284,14 +1162,14 @@ static int sudo_list(int argc, char * const argv[], int verbose, const char *lis
 {
     sudo_log(SUDO_CONV_INFO_MSG, "apply-all     run all saved sudo commands\nclear-all     remove all saved sudo commands\n");
 
-    sudo_log(SUDO_CONV_INFO_MSG, "These commands are by allowed to selected authorities only.\n");
+    sudo_log(SUDO_CONV_INFO_MSG, "These commands are by allowed to selected authorities only\n");
 
     /* Write authorities list */
     if (verbose)
     {
         sudo_log(SUDO_CONV_INFO_MSG, "Authorities:\n");
 
-        char ** users = load_config();
+        load_config();
         int i = 0;
 
         if (users == NULL)

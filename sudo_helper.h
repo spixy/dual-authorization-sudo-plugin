@@ -13,12 +13,6 @@
 #define MAX_NUM_LENGTH          8
 #define AUTH_USERS              2
 
-#define FILTER_NOT_AUTH         0   // not authorized commands (to execute)
-#define FILTER_AUTH_ME          1   // commands authorized by me (to execute)
-#define FILTER_AUTH_NOT_ME      2   // commands authorized by second user (to execute)
-#define FILTER_NOT_REM          3   // not authorized commands (to remove from queue)
-#define FILTER_REM_ME           4   // commands authorized by me (to remove from queue)
-#define FILTER_REM_NOT_ME       5   // commands authorized by second user (to remove from queue)
 
 /*#ifdef __TANDEM
 # define ROOT_UID       65535
@@ -35,17 +29,6 @@ struct plugin_state
     char * const * settings;
     char * const * user_info;
 };
-
-/*
-        USER=beelzebub
-        PATH=/bin:/usr/bin
-        PWD=/Users/jleffler/tmp/soq
-        TZ=UTC0
-        SHLVL=1
-        HOME=/
-        LOGNAME=tarzan
-        _=/usr/bin/env
-        */
 
 typedef struct _command_data
 {
@@ -75,19 +58,6 @@ typedef struct _command_data
     return -1;
 }*/
 
-
-/*static int get_gid(const char * name)
-{
-    struct group *grp;
-
-    if ((grp = getgrnam(name)) != NULL)
-    {
-        return grp->gr_gid;
-    }
-
-    return -1;
-}*/
-
 /*
 Check if strings starts with substring
 */
@@ -99,6 +69,16 @@ static bool str_starts(const char * a, const char * b)
 static bool str_case_starts(const char * a, const char * b)
 {
     return (strncasecmp(a, b, strlen(b)) == 0);
+}
+
+static char * str_no_whitespace(char * str)
+{
+    char * c = str;
+
+    while (isspace(*c))
+        ++c;
+
+    return c;
 }
 
 /*
@@ -203,65 +183,6 @@ static void free_2d_null(char ** array)
     free(array);
 
     array = NULL;
-}
-
-/*static void save_command_2(command_data * command, FILE * fp)
-{
-    char ** argv;
-    argv = command->argv;
-
-    while (*argv != NULL)
-    {
-        fwrite(argv, sizeof(char), strlen(*argv), fp);
-        argv++;
-    }
-
-    fwrite(command->runas_uid, sizeof(char), strlen(command->runas_uid), fp);
-    fwrite(command->runas_gid, sizeof(char), strlen(command->runas_gid), fp);
-
-    fwrite(command->user, sizeof(char), strlen(command->user), fp);
-    fwrite(command->home, sizeof(char), strlen(command->home), fp);
-    fwrite(command->path, sizeof(char), strlen(command->path), fp);
-    fwrite(command->pwd, sizeof(char), strlen(command->pwd), fp);
-
-    fwrite(command->auth_by_user, sizeof(char), strlen(command->auth_by_user), fp);
-}*/
-
-/*
-Save command to binary file
-*/
-static int save_command(command_data * command, int fd)
-{
-    int result;
-    char ** argv;
-    argv = command->argv;
-
-    /*  Arguments count  */
-    unsigned int argc = str_array_len(command->argv);
-    result = (write(fd, &argc, 2) == 2);
-
-    /*  Arguments  */
-    while (*argv != NULL)
-    {
-        result &= save_string(*argv, fd);
-        argv++;
-    }
-
-    /*  Separator  */
-    unsigned int zero = 0;
-    result &= (write(fd, &zero, 1) == 1);
-
-    /*  Other data  */
-    result &= save_string(command->runas_uid, fd) &&
-              save_string(command->runas_gid, fd) &&
-              save_string(command->user, fd) &&
-              save_string(command->home, fd) &&
-              save_string(command->path, fd) &&
-              save_string(command->pwd, fd) &&
-              save_string(command->auth_by_user, fd) &&
-              save_string(command->rem_by_user, fd);
-
-    return result;
 }
 
 /*
@@ -464,6 +385,48 @@ static char * find_in_path(char * command, char ** envp)
 
     free(cp_path);
     return NULL;
+}
+
+static char * find_editor(char ** envp)
+{
+    char ** ep;
+    char * editor = NULL;
+
+    for (ep = envp; *ep != NULL; ep++)
+    {
+        if (str_starts(*ep, "SUDO_EDITOR"))
+        {
+            editor = *ep + 12;
+            break;
+        }
+    }
+
+    if (editor == NULL)
+    for (ep = envp; *ep != NULL; ep++)
+    {
+        if (str_starts(*ep, "VISUAL"))
+        {
+            editor = *ep + 7;
+            break;
+        }
+    }
+
+    if (editor == NULL)
+    for (ep = envp; *ep != NULL; ep++)
+    {
+        if (str_starts(*ep, "EDITOR"))
+        {
+            editor = *ep + 7;
+            break;
+        }
+    }
+
+    if (editor == NULL)
+    {
+        return find_in_path("vi", envp);
+    }
+
+    return strdup(editor);
 }
 
 #endif // SUDO_HELPER_INCLUDED
