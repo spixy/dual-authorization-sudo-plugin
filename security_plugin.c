@@ -37,11 +37,11 @@ static uid_t runas_uid = NULL;
 static gid_t runas_gid = NULL;
 static const char * runas_user = NULL;
 static const char * runas_group = NULL;
-static char ** users;
+static char ** users = NULL;
 static char * user = NULL;
-static char * pwd = NULL;
 static char * cwd = NULL;
 static char * prompt = NULL;
+static char * pwd = NULL;
 static int use_sudoedit = false;
 
 static int load_config();
@@ -93,19 +93,17 @@ static void print_command(command_data * command, int full)
 }
 
 /*
-Reads data from conf file
-returns users
+Reads data (users + prompt) from conf file
 */
 static int load_config()
 {
     FILE * fp;
 
-    if ( (users = malloc( (AUTH_USERS+1) * sizeof(char*))) == NULL)
+    if ( (users = calloc( (AUTH_USERS+1), sizeof(char*))) == NULL)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "cannot allocate data\n");
         return false;
     }
-    users[AUTH_USERS] = NULL;
 
     if ( (fp = fopen(PLUGIN_CONF_FILE, "r")) == NULL )
     {
@@ -127,81 +125,90 @@ static int load_config()
             buffer[len - 1] = '\0';
 
             // ignore empty lines and comments
-            if (len > 0 && buffer[0] != '#')
+            if (len == 0 || buffer[0] == '#' || buffer[0] == '\0')
+                continue;
+
+            // load prompt
+            if (str_case_starts(buffer, "prompt ") && (size_t)len > strlen("prompt "))
             {
-                // load prompt
-                if (str_case_starts(buffer, "prompt ") && (size_t)len > strlen("prompt "))
+                free(prompt);
+                prompt = strdup(buffer + strlen("prompt "));
+                continue;
+            }
+
+            // parsing "user xxx"
+            if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user "))
+            {
+                char * user_name = strdup(str_no_whitespace(buffer + strlen("user ")));
+
+                // checks if user exists
+                if (getpwnam(user_name) == NULL)
                 {
-                    free(prompt);
-                    prompt = strdup(buffer + strlen("prompt "));
+                    free(user_name);
+                    sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", user);
+                    continue;
+                }
+
+                // checks if user is already loaded
+                if (array_contains(user_name, users, usercount))
+                {
+                    free(user_name);
+                    sudo_log(SUDO_CONV_ERROR_MSG, "found duplicate of user %s, skipping\n", user_name);
                     continue;
                 }
 
                 // maximum user count loaded
                 if (usercount == AUTH_USERS)
                 {
-                    fclose(fp);
-                    free(buffer);
-                    sudo_log(SUDO_CONV_ERROR_MSG, "too many users stored in %s (maximum is %d)\n", STR(PLUGIN_CONF_FILE), AUTH_USERS);
-                    free_2d(users, AUTH_USERS);
-                    return false;
-                }
-
-                // parsing "user xxx"
-                if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user "))
-                {
-                    char user_name[MAX_USER_LENGTH + 1];
-                    strcpy(user_name, buffer + strlen("user "));
-
-                    // checks if user exists
-                    if (getpwnam(user_name) == NULL)
-                    {
-                        sudo_log(SUDO_CONV_ERROR_MSG, "user %s not found\n", user);
-                        continue;
-                    }
-
-                    // checks if user is already loaded
-                    if (array_contains(user_name, users, usercount))
-                    {
-                        sudo_log(SUDO_CONV_ERROR_MSG, "found duplicate of user %s, skipping\n", user_name);
-                        continue;
-                    }
-
-                    // save user name
-                    users[usercount] = malloc( strlen(user_name) + 1 );
-                    strcpy(users[usercount], user_name);
-
+                    free(user_name);
                     usercount++;
+                    break;
                 }
-                else if (str_case_starts(buffer, "uid ") && (size_t)len > strlen("uid ")) // parsing "uid 123"
+
+                // save user name
+                users[usercount] = malloc( strlen(user_name) + 1 );
+                strcpy(users[usercount], user_name);
+
+                free(user_name);
+                usercount++;
+            }
+            else if (str_case_starts(buffer, "uid ") && (size_t)len > strlen("uid ")) // parsing "uid 123"
+            {
+                char * user_id = strdup(str_no_whitespace(buffer + strlen("uid ")));
+
+                // get user struct
+                uid_t id = strtol(user_id, NULL, 10);
+                pw = getpwuid(id);
+
+                if (pw == NULL)
                 {
-                    // get user id
-                    char user_id[MAX_NUM_LENGTH + 1];
-                    strcpy(user_id, buffer + strlen("uid "));
-
-                    // get user struct
-                    uid_t id = strtol(user_id, NULL, 10);
-                    pw = getpwuid(id);
-
-                    if (pw == NULL)
-                    {
-                        sudo_log(SUDO_CONV_ERROR_MSG, "user with id %s not found\n", user_id);
-                        continue;
-                    }
-
-                    // checks if user is already loaded
-                    if (array_contains(pw->pw_name, users, usercount))
-                    {
-                        sudo_log(SUDO_CONV_ERROR_MSG, "found duplicate of user %s, skipping\n", pw->pw_name);
-                        continue;
-                    }
-
-                    // save user name
-                    users[usercount] = malloc( strlen(pw->pw_name) + 1 );
-                    strcpy(users[usercount], pw->pw_name);
-
-                    usercount++;
+                    free(user_id);
+                    sudo_log(SUDO_CONV_ERROR_MSG, "user with id %s not found\n", user_id);
+                    continue;
                 }
+
+                // checks if user is already loaded
+                if (array_contains(pw->pw_name, users, usercount))
+                {
+                    free(user_id);
+                    sudo_log(SUDO_CONV_ERROR_MSG, "found duplicate of user %s, skipping\n", pw->pw_name);
+                    continue;
+                }
+
+                // maximum user count loaded
+                if (usercount == AUTH_USERS)
+                {
+                    free(user_id);
+                    usercount++;
+                    break;
+                }
+
+                // save user name
+                users[usercount] = malloc( strlen(pw->pw_name) + 1 );
+                strcpy(users[usercount], pw->pw_name);
+
+                free(user_id);
+                usercount++;
             }
     }
 
@@ -209,6 +216,12 @@ static int load_config()
     free(buffer);
 
     // check if it loaded needed user count
+    if (usercount > AUTH_USERS)
+    {
+        free_2d(users, AUTH_USERS);
+        sudo_log(SUDO_CONV_ERROR_MSG, "too many users stored in %s (maximum is %d)\n", STR(PLUGIN_CONF_FILE), AUTH_USERS);
+        return false;
+    }
     if (usercount < AUTH_USERS)
     {
         free_2d(users, AUTH_USERS);
@@ -227,17 +240,6 @@ static char ** build_envp(command_data * command)
     static char ** envp;
     int i = 0;
 
-    /*
-        USER=beelzebub
-        PATH=/bin:/usr/bin
-        PWD=/Users/jleffler/tmp/soq
-        TZ=UTC0
-        SHLVL=1
-        HOME=/
-        LOGNAME=tarzan
-        _=/usr/bin/env
-    */
-
     if ( (envp = malloc(5 * sizeof(char *))) == NULL )
     {
         return NULL;
@@ -246,7 +248,7 @@ static char ** build_envp(command_data * command)
     if (asprintf(&envp[i++], "USER=%s", command->user) == -1 ||
         asprintf(&envp[i++], "HOME=%s", command->home) == -1 ||
         asprintf(&envp[i++], "PATH=%s", command->path) == -1 ||
-        asprintf(&envp[i++], "PWD=%s", command->pwd ) == -1)
+        asprintf(&envp[i++], "PWD=%s",  command->pwd ) == -1)
     {
         free_2d(envp, i-1);
         return NULL;
@@ -465,7 +467,7 @@ static int save(command_data ** commands)
     /* Commands count */
     unsigned int count = commands_array_len(commands);
 
-    if (write(fd, &count, 2) != 2)
+    if (write(fd, &count, 4) != 4)
     {
         close(fd);
         free(fileName);
@@ -490,8 +492,6 @@ static int save(command_data ** commands)
 
     unlink(fileName);
 
-    // free(fileName);  // free(): invalid pointer
-
     close(fd);
 
     return result;
@@ -502,14 +502,14 @@ Load string from file
 */
 static char * load_string(FILE * fp)
 {
-    unsigned char int_buffer[2];
+    unsigned char int_buffer[4];
 
-    if (fread(int_buffer, 2, 1, fp) != 1)
+    if (fread(int_buffer, 4, 1, fp) != 1)
     {
         return NULL;
     }
 
-    unsigned int len = int_buffer[0] + int_buffer[1]*256;
+    unsigned int len = int_buffer[0] + int_buffer[1]*256 + int_buffer[2]*256*256 + int_buffer[3]*256*256*256;
     char * str;
 
     if (len == 0)
@@ -600,7 +600,7 @@ static command_data ** load()
 {
     FILE * fp;
     command_data ** cmds;
-    unsigned char int_buffer[2];
+    unsigned char int_buffer[4];
 
     if ( (fp = fopen(PLUGIN_COMMANDS_FILE, "rb")) == NULL )
     {
@@ -608,13 +608,13 @@ static command_data ** load()
     }
 
     /* Commands count */
-    if (fread(int_buffer, 2, 1, fp) != 1)
+    if (fread(int_buffer, 4, 1, fp) != 1)
     {
         fclose(fp);
         return NULL;
     }
 
-    unsigned int count = int_buffer[0] + int_buffer[1]*256;
+    unsigned int count = int_buffer[0] + int_buffer[1]*256 + int_buffer[2]*256*256 + int_buffer[3]*256*256*256;
 
     if ( (cmds = malloc( (count+1) * sizeof(command_data*) )) == NULL )
     {
@@ -764,7 +764,7 @@ static int PAM_conv(int num_msg, const struct pam_message **msg, struct pam_resp
 }
 
 /*
-Authorise user via PAM
+Authenticate user via PAM
 */
 static int check_passwd(const char* auth_user)
 {
@@ -782,7 +782,7 @@ static int check_passwd(const char* auth_user)
     /* Get password from user */
     struct sudo_conv_message msgs[1];
     char * msg = NULL;
-    msgs[0].msg_type = SUDO_CONV_PROMPT_MASK;
+    msgs[0].msg_type = SUDO_CONV_PROMPT_ECHO_OFF;
 
     if (asprintf(&msg, "%s password:", auth_user) == -1)
     {
@@ -793,11 +793,11 @@ static int check_passwd(const char* auth_user)
     struct sudo_conv_reply replies[1];
     sudo_conv(1, msgs, replies);
 
-    pwd = strdup(replies[0].reply);
     free(msg);
+    pwd = replies[0].reply;
 
     /* Authenticate user  */
-    result = pam_authenticate(pamh, 0);  // possible PAM_DISALLOW_NULL_AUTHTOK
+    result = pam_authenticate(pamh, PAM_DISALLOW_NULL_AUTHTOK);
 
     if (!check_pam_result(result))
     {
@@ -844,16 +844,15 @@ static int execute(command_data * command)
         }
 
         /* find executable path  */
-        command->file = find_in_path(command->argv[0], envp);
+        char * file = find_in_path(command->argv[0], envp);
 
         /* execute the command  */
-        if (execve(command->file, &command->argv[0], &envp[0]) < 0)
+        if (execve(file, &command->argv[0], &envp[0]) < 0)
         {
             return false;
         }
 
         exit(0);
-        //return true;
     }
     else /* for the parent  */
     {
@@ -888,7 +887,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             return -1;
         }
 
-        int i = 0;
+        unsigned int i = 0;
         while (cmds[i] != NULL)
         {
             print_command(cmds[i], false);
@@ -936,6 +935,8 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             return -1;
         }
 
+        unsigned int length = commands_array_len(cmds);
+
         /* Prepare conversation */
         struct sudo_conv_message msgs[1];
         struct sudo_conv_reply replies[1];
@@ -944,10 +945,10 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         msgs[0].msg_type = SUDO_CONV_PROMPT_ECHO_OFF;
         msgs[0].msg = msg;
 
-        int i = 0;
+        unsigned int i = 0;
         while (cmds[i] != NULL)
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "%d: ", i);
+            sudo_log(SUDO_CONV_ERROR_MSG, "%u/%u: ", i+1, length);
             print_command(cmds[i], false);
 
             sudo_conv(1, msgs, replies);
@@ -1095,6 +1096,9 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
     }
 }
 
+/*
+Create command from arguments and append to list of commands
+*/
 static int append_command(char ** argv)
 {
     int result;
@@ -1121,7 +1125,7 @@ static int append_command(char ** argv)
             /* Save commands to file */
             result = save(cmds_save);
 
-            int count = commands_array_len(cmds_save);
+            unsigned int count = commands_array_len(cmds_save);
 
             cmds_save[count-1] = NULL;
 

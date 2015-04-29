@@ -2,23 +2,12 @@
 #define SUDO_HELPER_INCLUDED
 
 #define PLUGIN_NAME                     "Sudo Security Plugin"
-
 #define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
 #define PLUGIN_DATA_DIR                 "/etc/sudo_security_plugin/"
 #define PLUGIN_COMMANDS_FILE            "/etc/sudo_security_plugin/commands"
 #define PLUGIN_COMMANDS_TEMP_FILE       "/tmp/sudo_security_plugin_XXXXXX"
 #define BOTH_USERS_AUTHENTICATED        " "
-
-#define MAX_USER_LENGTH        32
-#define MAX_NUM_LENGTH          8
-#define AUTH_USERS              2
-
-
-/*#ifdef __TANDEM
-# define ROOT_UID       65535
-#else
-# define ROOT_UID       0
-#endif*/
+#define AUTH_USERS                      (2)
 
 #define QUOTE(name) #name
 #define STR(macro) QUOTE(macro)
@@ -32,7 +21,6 @@ struct plugin_state
 
 typedef struct _command_data
 {
-    char * file;
     char ** argv;
     char * runas_uid;
     char * runas_gid;
@@ -42,21 +30,8 @@ typedef struct _command_data
     char * pwd;
     char * auth_by_user;
     char * rem_by_user;
-    int sudoedit;
 } command_data;
 
-
-/*static int get_uid(const char * name)
-{
-    struct passwd *pw;
-
-    if ((pw = getpwnam(name)) != NULL)
-    {
-        return pw->pw_uid;
-    }
-
-    return -1;
-}*/
 
 /*
 Check if strings starts with substring
@@ -71,6 +46,9 @@ static bool str_case_starts(const char * a, const char * b)
     return (strncasecmp(a, b, strlen(b)) == 0);
 }
 
+/*
+Removes whitespaces from string
+*/
 static char * str_no_whitespace(char * str)
 {
     char * c = str;
@@ -82,15 +60,8 @@ static char * str_no_whitespace(char * str)
 }
 
 /*
-Check if strings starts with substring
+Get array length
 */
-/*static bool str_starts_and_ends(const char * a, const char * b)
-{
-    int len = strlen(a);
-
-    return ( (len >= 2) && (a[0] == b) && (a[len-1] == b) );
-}*/
-
 static unsigned int str_array_len(char ** array)
 {
     unsigned int len = 0;
@@ -108,7 +79,7 @@ static unsigned int str_array_len(char ** array)
 }
 
 /*
-Save string to binary file <length:2bytes><string>
+Save string to binary file <length:4bytes><string>
 */
 static int save_string(char * str, int fd)
 {
@@ -116,13 +87,13 @@ static int save_string(char * str, int fd)
     {
         unsigned int len = strlen(str) + 1;
 
-        return (write(fd, &len, 2) == 2 &&
+        return (write(fd, &len, 4) == 4 &&
                 write(fd, str, len) == (int)len);
     }
     else
     {
         unsigned int zero = 0;
-        return (write(fd, &zero, 2) == 2);
+        return (write(fd, &zero, 4) == 4);
     }
 }
 
@@ -198,7 +169,6 @@ static command_data * make_command()
     }
 
     command->argv = NULL;
-    command->file = NULL;
     command->runas_uid = NULL;
     command->runas_gid = NULL;
     command->user = NULL;
@@ -207,7 +177,6 @@ static command_data * make_command()
     command->pwd = NULL;
     command->auth_by_user = NULL;
     command->rem_by_user = NULL;
-    command->sudoedit = false;
 
     return command;
 }
@@ -217,7 +186,6 @@ static void free_command(command_data * command)
     if (command == NULL)
         return;
 
-    free(command->file);
     free(command->runas_uid);
     free(command->runas_gid);
     free(command->user);
@@ -235,14 +203,14 @@ static void free_command(command_data * command)
 }
 
 /*
-Frees commands
+Free commands array
 */
 static void free_commands_null(command_data ** commands)
 {
     if (commands == NULL)
         return;
 
-    int i = 0;
+    unsigned int i = 0;
     while (commands[i] != NULL)
     {
         free_command(commands[i]);
@@ -251,15 +219,18 @@ static void free_commands_null(command_data ** commands)
     commands = NULL;
 }
 
+/*
+Remove command from commands array
+*/
 static command_data ** remove_command(command_data ** array, command_data * cmd)
 {
     if (array == NULL || cmd == NULL)
         return NULL;
 
-    int count = commands_array_len(array);
-    int index = 0;
+    unsigned int count = commands_array_len(array);
+    unsigned int index = 0;
 
-    for (int i = 0; i < count; i++)
+    for (unsigned int i = 0; i < count; i++)
     {
         if (array[i] != cmd)
         {
@@ -273,12 +244,15 @@ static command_data ** remove_command(command_data ** array, command_data * cmd)
     return array;
 }
 
+/*
+Add command to commands array
+*/
 static command_data ** add_command(command_data ** array, command_data * command)
 {
     if (array == NULL || command == NULL)
         return NULL;
 
-    int count = commands_array_len(array) + 2;
+    unsigned int count = commands_array_len(array) + 2;
 
     command_data ** cmds;
 
@@ -387,6 +361,9 @@ static char * find_in_path(char * command, char ** envp)
     return NULL;
 }
 
+/*
+Find editor for sudoedit
+*/
 static char * find_editor(char ** envp)
 {
     char ** ep;
