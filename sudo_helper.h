@@ -22,8 +22,8 @@ struct plugin_state
 typedef struct _command_data
 {
     char ** argv;
-    char * runas_uid;
-    char * runas_gid;
+    char * runas_user;
+    char * runas_group;
     char * user;
     char * home;
     char * path;
@@ -51,6 +51,9 @@ Removes whitespaces from string
 */
 static char * str_no_whitespace(char * str)
 {
+    if (!str)
+        return NULL;
+
     char * c = str;
 
     while (isspace(*c))
@@ -83,7 +86,7 @@ Save string to binary file <length:4bytes><string>
 */
 static int save_string(char * str, int fd)
 {
-    if (str != NULL)
+    if (str)
     {
         unsigned int len = strlen(str) + 1;
 
@@ -107,7 +110,7 @@ static unsigned int commands_array_len(command_data ** array)
     command_data ** cmd;
     cmd = array;
 
-    while (*cmd != NULL)
+    while (*cmd)
     {
         cmd++;
         len++;
@@ -121,7 +124,7 @@ Frees 2D array
 */
 static void free_2d(char ** array, size_t count)
 {
-    if (array == NULL)
+    if (!array)
         return;
 
     for (size_t i = 0; i < count; ++i)
@@ -139,13 +142,13 @@ Frees 2D array
 */
 static void free_2d_null(char ** array)
 {
-    if (array == NULL)
+    if (!array)
         return;
 
     char ** str;
     str = array;
 
-    while (*str != NULL)
+    while (*str)
     {
         free(*str);
         str++;
@@ -169,8 +172,8 @@ static command_data * make_command()
     }
 
     command->argv = NULL;
-    command->runas_uid = NULL;
-    command->runas_gid = NULL;
+    command->runas_user = NULL;
+    command->runas_group = NULL;
     command->user = NULL;
     command->home = NULL;
     command->path = NULL;
@@ -183,11 +186,11 @@ static command_data * make_command()
 
 static void free_command(command_data * command)
 {
-    if (command == NULL)
+    if (!command)
         return;
 
-    free(command->runas_uid);
-    free(command->runas_gid);
+    free(command->runas_user);
+    free(command->runas_group);
     free(command->user);
     free(command->home);
     free(command->path);
@@ -207,7 +210,7 @@ Free commands array
 */
 static void free_commands_null(command_data ** commands)
 {
-    if (commands == NULL)
+    if (!commands)
         return;
 
     unsigned int i = 0;
@@ -224,7 +227,7 @@ Remove command from commands array
 */
 static command_data ** remove_command(command_data ** array, command_data * cmd)
 {
-    if (array == NULL || cmd == NULL)
+    if (!array || !cmd)
         return NULL;
 
     unsigned int count = commands_array_len(array);
@@ -249,7 +252,7 @@ Add command to commands array
 */
 static command_data ** add_command(command_data ** array, command_data * command)
 {
-    if (array == NULL || command == NULL)
+    if (!array || !command)
         return NULL;
 
     unsigned int count = commands_array_len(array) + 2;
@@ -272,7 +275,7 @@ Check if array contains string
 */
 static bool array_contains(const char * str, char ** array, size_t count)
 {
-    if (array == NULL || str == NULL)
+    if (!array || !str)
         return false;
 
     for (size_t i = 0; i < count; ++i)
@@ -398,6 +401,7 @@ static char * find_editor(char ** envp)
         }
     }
 
+    /* Try to search for VI editor */
     if (editor == NULL)
     {
         return find_in_path("vi", envp);
