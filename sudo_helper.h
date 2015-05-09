@@ -1,27 +1,28 @@
 #ifndef SUDO_HELPER_INCLUDED
 #define SUDO_HELPER_INCLUDED
 
-#define PLUGIN_NAME                     "Sudo Security Plugin"
+#include <limits.h>
+
+
+#define PLUGIN_NAME                     "Sudo Dual Authorization Security Plugin"
 #define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
 #define PLUGIN_DATA_DIR                 "/etc/sudo_security_plugin/"
 #define PLUGIN_COMMANDS_FILE            "/etc/sudo_security_plugin/commands"
-#define PLUGIN_COMMANDS_TEMP_FILE       "/tmp/sudo_security_plugin_XXXXXX"
-#define BOTH_USERS_AUTHENTICATED        " "
-#define AUTH_USERS                      (2)
+#define PLUGIN_COMMANDS_TEMP_FILE       "/etc/sudo_security_plugin/commands-XXXXXX"
+#define BOTH_USERS_AUTHENTICATED        "BOTH_USERS"
+#define NO_USER                         "N/A"
+#define MIN_AUTH_USERS                   (2)
+#define MAX_2_BYTES                      65535
+#define PACKAGE_VERSION                  0.1
 
 #define QUOTE(name) #name
 #define STR(macro) QUOTE(macro)
 
-struct plugin_state
-{
-    char ** envp;
-    char * const * settings;
-    char * const * user_info;
-};
-
 typedef struct _command_data
 {
+    char * file;
     char ** argv;
+    char sudoedit;
     char * runas_user;
     char * runas_group;
     char * user;
@@ -31,7 +32,6 @@ typedef struct _command_data
     char * auth_by_user;
     char * rem_by_user;
 } command_data;
-
 
 /*
 Check if strings starts with substring
@@ -46,10 +46,43 @@ static bool str_case_starts(const char * a, const char * b)
     return (strncasecmp(a, b, strlen(b)) == 0);
 }
 
+char * concat(char ** array)
+{
+    if (!array)
+        return NULL;
+
+    char * str = NULL;
+    size_t total_length = 1;
+
+    char ** current;
+    current = array;
+
+    while (*current != NULL)
+    {
+        total_length += strlen(*current);
+        current++;
+    }
+
+    if ((str = malloc(total_length)) == NULL)
+        return NULL;
+
+    str[0] = '\0';
+
+    current = array;
+
+    while (*current != NULL)
+    {
+        strcat(str, *current);
+        current++;
+    }
+
+  return str;
+}
+
 /*
 Removes whitespaces from string
 */
-static char * str_no_whitespace(char * str)
+static char * rem_whitespace(char * str)
 {
     if (!str)
         return NULL;
@@ -57,7 +90,9 @@ static char * str_no_whitespace(char * str)
     char * c = str;
 
     while (isspace(*c))
+    {
         ++c;
+    }
 
     return c;
 }
@@ -65,9 +100,9 @@ static char * str_no_whitespace(char * str)
 /*
 Get array length
 */
-static unsigned int str_array_len(char ** array)
+static size_t str_array_len(char ** array)
 {
-    unsigned int len = 0;
+    size_t len = 0;
 
     char ** str;
     str = array;
@@ -81,6 +116,43 @@ static unsigned int str_array_len(char ** array)
     return len;
 }
 
+static bool is_little_endian()
+{
+    int n = 1;
+    return (*(char *)&n == 1);
+}
+
+static size_t convert_from_bytes(unsigned char * array, size_t size)
+{
+    if (!array)
+        return 0;
+
+    switch (size)
+    {
+        case 1:
+            return array[0];
+        case 2:
+            if (is_little_endian())
+            {
+                return array[0] + (array[1] << 8);
+            }
+            else
+            {
+                return (array[0] << 8) + array[1];
+            }
+        case 4:
+            if (is_little_endian())
+            {
+                return array[0] + (array[1] << 8) + (array[2] << 16) + (array[3] << 24);
+            }
+            else
+            {
+                return (array[0] << 24) + (array[1] << 16) + (array[2] << 8) + array[3];
+            }
+    }
+    return 0;
+}
+
 /*
 Save string to binary file <length:4bytes><string>
 */
@@ -88,7 +160,7 @@ static int save_string(char * str, int fd)
 {
     if (str)
     {
-        unsigned int len = strlen(str) + 1;
+        size_t len = strlen(str) + 1;
 
         return (write(fd, &len, 4) == 4 &&
                 write(fd, str, len) == (int)len);
@@ -101,11 +173,55 @@ static int save_string(char * str, int fd)
 }
 
 /*
+Load string from file
+*/
+static int load_string(int fd, char ** str)
+{
+    unsigned char int_buffer[4];
+    char * string;
+
+    if (read(fd, int_buffer, 4) != 4)
+    {
+        return false;
+    }
+
+    size_t len = convert_from_bytes(int_buffer, 4);
+
+    if (len == 0)
+    {
+        *str = NULL;
+        return true;
+    }
+
+    if ((string = malloc(sizeof(char) * len)) == NULL)
+    {
+        return false;
+    }
+
+    if (read(fd, string, sizeof(char) * len) != (ssize_t)len)
+    {
+        free(string);
+        return false;
+    }
+
+    /* Checking length */
+    if (string[len-1] != '\0' || strlen(string)+1 != len)
+    {
+        free(string);
+        return false;
+    }
+
+    *str = string;
+
+    return true;
+}
+
+/*
 Array size
 */
-static unsigned int commands_array_len(command_data ** array)
+static size_t commands_array_len(command_data ** array)
 {
-    unsigned int len = 0;
+    size_t len = 0;
 
     command_data ** cmd;
     cmd = array;
@@ -133,8 +249,6 @@ static void free_2d(char ** array, size_t count)
     }
 
     free(array);
-
-    array = NULL;
 }
 
 /*
@@ -155,8 +269,6 @@ static void free_2d_null(char ** array)
     }
 
     free(array);
-
-    array = NULL;
 }
 
 /*
@@ -171,7 +283,9 @@ static command_data * make_command()
         return NULL;
     }
 
+    command->file = NULL;
     command->argv = NULL;
+    command->sudoedit = false;
     command->runas_user = NULL;
     command->runas_group = NULL;
     command->user = NULL;
@@ -189,6 +303,7 @@ static void free_command(command_data * command)
     if (!command)
         return;
 
+    free(command->file);
     free(command->runas_user);
     free(command->runas_group);
     free(command->user);
@@ -201,8 +316,6 @@ static void free_command(command_data * command)
     free_2d_null(command->argv);
 
     free(command);
-
-    command = NULL;
 }
 
 /*
@@ -213,38 +326,12 @@ static void free_commands_null(command_data ** commands)
     if (!commands)
         return;
 
-    unsigned int i = 0;
+    size_t i = 0;
     while (commands[i] != NULL)
     {
         free_command(commands[i]);
         i++;
     }
-    commands = NULL;
-}
-
-/*
-Remove command from commands array
-*/
-static command_data ** remove_command(command_data ** array, command_data * cmd)
-{
-    if (!array || !cmd)
-        return NULL;
-
-    unsigned int count = commands_array_len(array);
-    unsigned int index = 0;
-
-    for (unsigned int i = 0; i < count; i++)
-    {
-        if (array[i] != cmd)
-        {
-            array[index] = array[i];
-            index++;
-        }
-    }
-
-    array[index] = NULL;
-
-    return array;
 }
 
 /*
@@ -255,17 +342,17 @@ static command_data ** add_command(command_data ** array, command_data * command
     if (!array || !command)
         return NULL;
 
-    unsigned int count = commands_array_len(array) + 2;
+    size_t count = commands_array_len(array);
 
     command_data ** cmds;
 
-    if ( (cmds = realloc(array, count * sizeof(command_data*) )) == NULL )
+    if ( (cmds = realloc(array, (count+2) * sizeof(command_data*) )) == NULL )
     {
         return NULL;
     }
 
-    cmds[count-2] = command;
-    cmds[count-1] = NULL;
+    cmds[count] = command;
+    cmds[count+1] = NULL;
 
     return cmds;
 }
@@ -273,7 +360,31 @@ static command_data ** add_command(command_data ** array, command_data * command
 /*
 Check if array contains string
 */
-static bool array_contains(const char * str, char ** array, size_t count)
+static bool array_null_contains(char ** array, const char * str)
+{
+    if (!array || !str)
+        return false;
+
+    char ** item;
+    item = array;
+
+    while (*item)
+    {
+        if (strcmp(*item, str) == 0)
+        {
+            return true;
+        }
+
+        item++;
+    }
+
+    return false;
+}
+
+/*
+Check if array contains string
+*/
+static bool array_contains(char ** array, const char * str, size_t count)
 {
     if (!array || !str)
         return false;
@@ -281,7 +392,9 @@ static bool array_contains(const char * str, char ** array, size_t count)
     for (size_t i = 0; i < count; ++i)
     {
         if (strcmp(array[i], str) == 0)
+        {
             return true;
+        }
     }
     return false;
 }
@@ -292,14 +405,16 @@ Search for file in a PATH variable
 static char * find_in_path(char * command, char ** envp)
 {
     struct stat sb;
-    char * path = NULL, *cp_path, **ep;
+    char * path = NULL, *cp_path;
     char * cmd = NULL;
 
      /* Already a path */
     if (strchr(command, '/') != NULL)
+    {
         return strdup(command);
+    }
 
-    for (ep = envp; *ep != NULL; ep++)
+    for (char ** ep = envp; *ep != NULL; ep++)
     {
         /* Search for PATH in environment vars */
         if (str_starts(*ep,"PATH="))
@@ -309,12 +424,14 @@ static char * find_in_path(char * command, char ** envp)
         }
     }
 
-    cp_path = strdup(path);
+    if (!path)
+    {
+        return NULL;
+    }
 
     /* Curent path */
     if ( asprintf(&cmd, "./%s",command) < 0 )
     {
-        free(cp_path);
         return NULL;
     }
 
@@ -328,17 +445,18 @@ static char * find_in_path(char * command, char ** envp)
     }
 
     free(cmd);
+    cp_path = strdup(path);
 
-    if (cp_path != NULL)
+    if (cp_path)
     {
         char * token;
 
         /* First path */
         token = strtok(cp_path, ":");
 
-        while ( token != NULL )
+        while (token)
         {
-            if ( asprintf(&cmd, "%s/%s", token, command) < 0 )
+            if (asprintf(&cmd, "%s/%s", token, command) < 0)
             {
                 free(cp_path);
                 return NULL;
@@ -374,9 +492,9 @@ static char * find_editor(char ** envp)
 
     for (ep = envp; *ep != NULL; ep++)
     {
-        if (str_starts(*ep, "SUDO_EDITOR"))
+        if (str_starts(*ep, "SUDO_EDITOR="))
         {
-            editor = *ep + 12;
+            editor = *ep + 13;
             break;
         }
     }
@@ -384,9 +502,9 @@ static char * find_editor(char ** envp)
     if (editor == NULL)
     for (ep = envp; *ep != NULL; ep++)
     {
-        if (str_starts(*ep, "VISUAL"))
+        if (str_starts(*ep, "VISUAL="))
         {
-            editor = *ep + 7;
+            editor = *ep + 8;
             break;
         }
     }
@@ -394,9 +512,9 @@ static char * find_editor(char ** envp)
     if (editor == NULL)
     for (ep = envp; *ep != NULL; ep++)
     {
-        if (str_starts(*ep, "EDITOR"))
+        if (str_starts(*ep, "EDITOR="))
         {
-            editor = *ep + 7;
+            editor = *ep + 8;
             break;
         }
     }
