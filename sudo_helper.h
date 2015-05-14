@@ -38,11 +38,17 @@ static bool str_starts(const char * a, const char * b)
     return (strncmp(a, b, strlen(b)) == 0);
 }
 
+/*
+Check if strings starts with substring, not case sensitive
+*/
 static bool str_case_starts(const char * a, const char * b)
 {
     return (strncasecmp(a, b, strlen(b)) == 0);
 }
 
+/*
+Concaterate string arrays to one string, with separators
+*/
 static char * concat(char ** array, char * separator)
 {
     if (!array)
@@ -102,7 +108,7 @@ static char * rem_whitespace(char * str)
 }
 
 /*
-Get array length
+Return array length
 */
 static size_t str_array_len(char ** array)
 {
@@ -126,7 +132,7 @@ static size_t str_array_len(char ** array)
 }
 
 /*
-Copy file
+Copy file (or create file)
 */
 static int copy_file(char * from, char * to)
 {
@@ -135,18 +141,34 @@ static int copy_file(char * from, char * to)
     struct stat s;
     off_t offset = 0;
 
-    if ((source_fd = open(from, O_RDONLY | O_CREAT, S_IRUSR | S_IWUSR)) == -1)
+    /* File does not exist */
+    if (!access(from, F_OK))
+    {
+        if ((target_fd = open(to, O_RDWR | O_CREAT | O_TRUNC , S_IRUSR | S_IWUSR)) == -1)
+        {
+            return false;
+        }
+        close(target_fd);
+        return true;
+    }
+
+    if ((source_fd = open(from, O_RDONLY)) == -1)
     {
         return false;
     }
 
-    if ((target_fd = open(to, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1)
+    if ((target_fd = open(to, O_RDWR | O_CREAT | O_TRUNC , S_IRUSR | S_IWUSR)) == -1)
     {
         close(source_fd);
         return false;
     }
 
-    fstat(source_fd, &s);
+    if (fstat(source_fd, &s) < 0)
+    {
+        close(source_fd);
+        close(target_fd);
+        return false;
+    }
 
     int result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : true;
 
@@ -193,7 +215,7 @@ static int cmp_files(char * oldFile, char * newFile)
 }
 
 /*
-Array size
+Return array size
 */
 static size_t commands_array_len(command_data ** array)
 {
@@ -257,6 +279,9 @@ static bool is_little_endian()
     return (*(char *)&n == 1);
 }
 
+/*
+Convert bytes to inteteger variable
+*/
 static size_t convert_from_bytes(unsigned char * array, size_t size)
 {
     if (!array)
@@ -291,7 +316,8 @@ static size_t convert_from_bytes(unsigned char * array, size_t size)
 }
 
 /*
-Save string to binary file <length:4bytes><string>
+Save string to binary file
+<length:4bytes><string>
 */
 static int save_string(char * str, int fd)
 {
@@ -310,7 +336,8 @@ static int save_string(char * str, int fd)
 }
 
 /*
-Load string from file
+Load string from binary file and save to str
+<length:4bytes><string>
 */
 static int load_string(int fd, char ** str)
 {
@@ -353,6 +380,10 @@ static int load_string(int fd, char ** str)
     return true;
 }
 
+/*
+Load from file string array terminated by NULL
+if error return NULL
+*/
 static char ** load_string_array(int fd)
 {
     unsigned char int_buffer[2];
@@ -537,7 +568,7 @@ static bool array_null_contains(char ** array, const char * str)
 }
 
 /*
-Search for file in a PATH variable
+Search for file in a PWD or PATH
 */
 static char * find_in_path(char * command, char ** envp, int mode)
 {
@@ -546,7 +577,7 @@ static char * find_in_path(char * command, char ** envp, int mode)
         return NULL;
     }
 
-    char * path = NULL, * pwd = NULL, * cp_path = NULL, * cmd = NULL;
+    char * path = NULL, * cp_path = NULL, * cmd = NULL;
 
      /* Already a path */
     if (command[0] == '/')
@@ -568,26 +599,6 @@ static char * find_in_path(char * command, char ** envp, int mode)
         return cmd;
     }
     free(cmd);
-
-    /* PWD */
-    for (char ** ep = envp; *ep != NULL; ep++)
-    {
-        if (str_starts(*ep,"PWD="))
-        {
-            pwd = * ep + 4;
-
-            if (asprintf(&cmd, "%s/%s", pwd, command) < 0)
-            {
-                return NULL;
-            }
-            if (access(cmd, mode) == 0)
-            {
-                return cmd;
-            }
-            free(cmd);
-            break;
-        }
-    }
 
     for (char ** ep = envp; *ep != NULL; ep++)
     {
@@ -635,49 +646,53 @@ static char * find_in_path(char * command, char ** envp, int mode)
 }
 
 /*
+Getenv from envp array
+*/
+static char * getenv_from_envp(char * name, char ** envp)
+{
+    char * key;
+    if (asprintf(&key, "%s=", name) < 0)
+    {
+        return NULL;
+    }
+
+    for (char ** ep = envp; *ep != NULL; ep++)
+    {
+        if (str_starts(*ep, key))
+        {
+            free(key);
+            return *ep + strlen(key) + 1;
+        }
+    }
+
+    free(key);
+    return NULL;
+}
+
+/*
 Find editor for sudoedit
 */
 static char * find_editor(char ** envp)
 {
-    char ** ep;
-    char * editor = NULL;
+    char * editor;
 
-    for (ep = envp; *ep != NULL; ep++)
+    if ((editor = getenv_from_envp("SUDO_EDITOR", envp)))
     {
-        if (str_starts(*ep, "SUDO_EDITOR="))
-        {
-            editor = *ep + 13;
-            break;
-        }
+        return strdup(editor);
     }
 
-    if (editor == NULL)
-    for (ep = envp; *ep != NULL; ep++)
+    if ((editor = getenv_from_envp("VISUAL", envp)))
     {
-        if (str_starts(*ep, "VISUAL="))
-        {
-            editor = *ep + 8;
-            break;
-        }
+        return strdup(editor);
     }
 
-    if (editor == NULL)
-    for (ep = envp; *ep != NULL; ep++)
+    if ((editor = getenv_from_envp("EDITOR", envp)))
     {
-        if (str_starts(*ep, "EDITOR="))
-        {
-            editor = *ep + 8;
-            break;
-        }
+        return strdup(editor);
     }
 
-    /* Try to search for VI editor */
-    if (editor == NULL)
-    {
-        return find_in_path("vi", envp, X_OK);
-    }
-
-    return strdup(editor);
+    /* Try to search for VIM editor */
+    return find_in_path("/usr/bin/vi", envp, X_OK);
 }
 
 #endif // SUDO_HELPER_INCLUDED
