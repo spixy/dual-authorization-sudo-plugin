@@ -23,6 +23,7 @@ build: ${TARGET}
 # install, root only
 install: build
 	cp ${TARGET} ${OUTPUT2}
+	#mkdir /var/lib/sudo_security_plugin
 	#[ -e "/etc/sudo.conf" ] && mv -f /etc/sudo.conf /etc/sudo.conf.bak
 	echo "Plugin sudoers_policy security_plugin.so" > /etc/sudo.conf
 

@@ -1,15 +1,16 @@
 #ifndef SUDO_HELPER_INCLUDED
 #define SUDO_HELPER_INCLUDED
 
-#include <limits.h>
+#include <stdint.h>
 
 #define PLUGIN_NAME                     "Sudo Dual Authorization Security Plugin"
 #define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
-#define PLUGIN_COMMANDS_FILE            "/var/sudo_security_plugin_commands"
-#define PLUGIN_COMMANDS_TEMP_FILE       "/var/sudo_security_plugin_commands-XXXXXX"
+#define PLUGIN_COMMANDS_FILE            "/var/lib/sudo_security_plugin/commands"
+#define PLUGIN_COMMANDS_TEMP_FILE       "/var/lib/sudo_security_plugin/commands-XXXXXX"
 #define NO_USER                         "N/A"
 #define MIN_AUTH_USERS                   2
-#define MAX_2_BYTES                      65535
+#define MAX_2_BYTES                      UINT16_MAX
+#define MAX_4_BYTES                      UINT32_MAX
 #define PACKAGE_VERSION                  0.1
 
 #define QUOTE(name) #name
@@ -70,7 +71,9 @@ static char * concat(char ** array, char * separator)
     }
 
     if ((str = malloc(total_length)) == NULL)
+    {
         return NULL;
+    }
 
     str[0] = '\0';
 
@@ -81,7 +84,9 @@ static char * concat(char ** array, char * separator)
         strcat(str, *current);
 
         if (*(++current))
+        {
             strcat(str, separator);
+        }
     }
 
   return str;
@@ -92,7 +97,8 @@ Removes whitespaces from string
 */
 static char * rem_whitespace(char * str)
 {
-    if (!str)
+    return str;
+    /*if (!str)
     {
         return NULL;
     }
@@ -104,7 +110,7 @@ static char * rem_whitespace(char * str)
         ++c;
     }
 
-    return c;
+    return c;*/
 }
 
 /*
@@ -144,7 +150,7 @@ static int copy_file(char * from, char * to)
     /* File does not exist */
     if (!access(from, F_OK))
     {
-        if ((target_fd = open(to, O_RDWR | O_CREAT | O_TRUNC , S_IRUSR | S_IWUSR)) == -1)
+        if ((target_fd = mkostemp(to, O_RDWR | O_CREAT | O_EXCL)) == -1)
         {
             return false;
         }
@@ -152,12 +158,13 @@ static int copy_file(char * from, char * to)
         return true;
     }
 
+    /* Copy file */
     if ((source_fd = open(from, O_RDONLY)) == -1)
     {
         return false;
     }
 
-    if ((target_fd = open(to, O_RDWR | O_CREAT | O_TRUNC , S_IRUSR | S_IWUSR)) == -1)
+    if ((target_fd = mkostemp(to, O_RDWR | O_CREAT | O_EXCL)) == -1)
     {
         close(source_fd);
         return false;
@@ -273,46 +280,53 @@ static void free_2d_null(char ** array)
     free(array);
 }
 
-static bool is_little_endian()
-{
-    int n = 1;
-    return (*(char *)&n == 1);
-}
-
 /*
 Convert bytes to inteteger variable
 */
-static size_t convert_from_bytes(unsigned char * array, size_t size)
+static size_t convert_from_bytes(unsigned char * array, size_t bytes)
 {
     if (!array)
     {
-        return 0;
+        return -1;
     }
 
-    switch (size)
+    switch (bytes)
     {
         case 1:
             return array[0];
         case 2:
-            if (is_little_endian())
-            {
-                return array[0] + (array[1] << 8);
-            }
-            else
-            {
-                return (array[0] << 8) + array[1];
-            }
+            return array[0] + (array[1] << 8);
         case 4:
-            if (is_little_endian())
-            {
-                return array[0] + (array[1] << 8) + (array[2] << 16) + (array[3] << 24);
-            }
-            else
-            {
-                return (array[0] << 24) + (array[1] << 16) + (array[2] << 8) + array[3];
-            }
+            return array[0] + (array[1] << 8) + (array[2] << 16) + (array[3] << 24);
+        default:
+            return -1;
     }
-    return 0;
+}
+
+/*
+Save int to binary file
+*/
+static int save_int(size_t value, int bytes, int fd)
+{
+    char val1, val2, val3, val4;
+
+    switch (bytes)
+    {
+        case 1:
+            return (write(fd, &value, 1) == 1);
+        case 2:
+            val1 =  value        & 0xFF;
+            val2 = (value >> 8)  & 0xFF;
+            return (write(fd, &val1, 1) == 1) && (write(fd, &val2, 1) == 1);
+        case 4:
+            val1 =  value        & 0xFF;
+            val2 = (value >> 8)  & 0xFF;
+            val3 = (value >> 16) & 0xFF;
+            val4 = (value >> 24) & 0xFF;
+            return (write(fd, &val1, 1) == 1) && (write(fd, &val2, 1) == 1) && (write(fd, &val3, 1) == 1) && (write(fd, &val4, 1) == 1);
+        default:
+            return -1;
+    }
 }
 
 /*
@@ -325,13 +339,13 @@ static int save_string(char * str, int fd)
     {
         size_t len = strlen(str) + 1;
 
-        return (write(fd, &len, 4) == 4 &&
-                write(fd, str, len) == (int)len);
+        return (len <= MAX_4_BYTES &&
+                save_int(len, 4, fd) &&
+                write(fd, str, len) == (ssize_t)len);
     }
     else
     {
-        unsigned int zero = 0;
-        return (write(fd, &zero, 4) == 4);
+        return save_int(0, 4, fd);
     }
 }
 
@@ -587,18 +601,6 @@ static char * find_in_path(char * command, char ** envp, int mode)
             return strdup(command);
         }
     }
-
-    /* PWD */
-    if (asprintf(&cmd, "%s/%s", getenv("PWD"), command) < 0)
-    {
-        return NULL;
-    }
-
-    if (access(cmd, mode) == 0)
-    {
-        return cmd;
-    }
-    free(cmd);
 
     for (char ** ep = envp; *ep != NULL; ep++)
     {
