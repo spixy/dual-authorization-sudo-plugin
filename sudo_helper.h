@@ -43,7 +43,7 @@ static bool str_case_starts(const char * a, const char * b)
     return (strncasecmp(a, b, strlen(b)) == 0);
 }
 
-char * concat(char ** array, char * separator)
+static char * concat(char ** array, char * separator)
 {
     if (!array)
     {
@@ -123,6 +123,132 @@ static size_t str_array_len(char ** array)
     }
 
     return len;
+}
+
+/*
+Copy file
+*/
+static int copy_file(char * from, char * to)
+{
+    int source_fd;
+    int target_fd;
+    struct stat s;
+    off_t offset = 0;
+
+    if ((source_fd = open(from, O_RDONLY | O_CREAT, S_IRUSR | S_IWUSR)) == -1)
+    {
+        return false;
+    }
+
+    if ((target_fd = open(to, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1)
+    {
+        close(source_fd);
+        return false;
+    }
+
+    fstat(source_fd, &s);
+
+    int result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : true;
+
+    close(source_fd);
+    close(target_fd);
+
+    return result;
+}
+
+/*
+Compares files
+-1 = error
+ 0 = not same
+ 1 = same
+*/
+static int cmp_files(char * oldFile, char * newFile)
+{
+    int ch1, ch2, result = 1;
+
+    FILE * fp1 = fopen(oldFile, "r");
+    FILE * fp2 = fopen(newFile, "r");
+
+    if (!fp1 || !fp2)
+    {
+        return -1;
+    }
+
+    do
+    {
+        ch1 = fgetc(fp1);
+        ch2 = fgetc(fp2);
+
+        if (ch1 != ch2)
+        {
+            result = 0;
+            break;
+        }
+    } while (ch1 != EOF);
+
+    fclose(fp1);
+    fclose(fp2);
+
+    return result;
+}
+
+/*
+Array size
+*/
+static size_t commands_array_len(command_data ** array)
+{
+    size_t len = 0;
+
+    command_data ** cmd;
+    cmd = array;
+
+    while (*cmd)
+    {
+        cmd++;
+        len++;
+    }
+
+    return len;
+}
+
+/*
+Frees 2D array
+*/
+static void free_2d(char ** array, size_t count)
+{
+    if (!array)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        free(array[i]);
+    }
+
+    free(array);
+}
+
+/*
+Frees 2D array
+*/
+static void free_2d_null(char ** array)
+{
+    if (!array)
+    {
+        return;
+    }
+
+    char ** str;
+    str = array;
+
+    while (*str)
+    {
+        free(*str);
+        str++;
+    }
+
+    free(array);
 }
 
 static bool is_little_endian()
@@ -227,63 +353,41 @@ static int load_string(int fd, char ** str)
     return true;
 }
 
-/*
-Array size
-*/
-static size_t commands_array_len(command_data ** array)
+static char ** load_string_array(int fd)
 {
-    size_t len = 0;
+    unsigned char int_buffer[2];
+    char ** array;
 
-    command_data ** cmd;
-    cmd = array;
-
-    while (*cmd)
+    /* Arguments count */
+    if (read(fd, int_buffer, 2) != 2)
     {
-        cmd++;
-        len++;
+        return NULL;
     }
 
-    return len;
-}
+    size_t argc = convert_from_bytes(int_buffer, 2);
 
-/*
-Frees 2D array
-*/
-static void free_2d(char ** array, size_t count)
-{
-    if (!array)
+    if ( (array = malloc((argc+1)*sizeof(char*))) == NULL )
     {
-        return;
+        return NULL;
     }
 
-    for (size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < argc; i++)
     {
-        free(array[i]);
+        char * str = NULL;
+
+        if (!load_string(fd, &str))
+        {
+            array[i] = NULL;
+            free_2d_null(array);
+            return NULL;
+        }
+
+        array[i] = str;
     }
 
-    free(array);
-}
+    array[argc] = NULL;
 
-/*
-Frees 2D array
-*/
-static void free_2d_null(char ** array)
-{
-    if (!array)
-    {
-        return;
-    }
-
-    char ** str;
-    str = array;
-
-    while (*str)
-    {
-        free(*str);
-        str++;
-    }
-
-    free(array);
+    return array;
 }
 
 /*
@@ -435,26 +539,58 @@ static bool array_null_contains(char ** array, const char * str)
 /*
 Search for file in a PATH variable
 */
-static char * find_in_path(char * command, char ** envp)
+static char * find_in_path(char * command, char ** envp, int mode)
 {
     if (!command)
     {
         return NULL;
     }
 
-    struct stat sb;
-    char * path = NULL, *cp_path;
-    char * cmd = NULL;
+    char * path = NULL, * pwd = NULL, * cp_path = NULL, * cmd = NULL;
 
      /* Already a path */
-    if (strchr(command, '/') != NULL)
+    if (command[0] == '/')
     {
-        return strdup(command);
+        if (access(command, mode) == 0)
+        {
+            return strdup(command);
+        }
+    }
+
+    /* PWD */
+    if (asprintf(&cmd, "%s/%s", getenv("PWD"), command) < 0)
+    {
+        return NULL;
+    }
+
+    if (access(cmd, mode) == 0)
+    {
+        return cmd;
+    }
+    free(cmd);
+
+    /* PWD */
+    for (char ** ep = envp; *ep != NULL; ep++)
+    {
+        if (str_starts(*ep,"PWD="))
+        {
+            pwd = * ep + 4;
+
+            if (asprintf(&cmd, "%s/%s", pwd, command) < 0)
+            {
+                return NULL;
+            }
+            if (access(cmd, mode) == 0)
+            {
+                return cmd;
+            }
+            free(cmd);
+            break;
+        }
     }
 
     for (char ** ep = envp; *ep != NULL; ep++)
     {
-        /* Search for PATH in environment vars */
         if (str_starts(*ep,"PATH="))
         {
             path = * ep + 5;
@@ -467,25 +603,7 @@ static char * find_in_path(char * command, char ** envp)
         return NULL;
     }
 
-    /* Curent path */
-    if ( asprintf(&cmd, "./%s", command) < 0 )
-    {
-        return NULL;
-    }
-
-    if (stat(cmd, &sb) == 0)
-    {
-        /* Check if file exist in path & have permission to execute */
-        if (S_ISREG(sb.st_mode) && (sb.st_mode & 0000111))
-        {
-            return cmd;
-        }
-    }
-
-    free(cmd);
-    cp_path = strdup(path);
-
-    if (cp_path)
+    if ((cp_path = strdup(path)) != NULL)
     {
         char * token;
 
@@ -500,14 +618,10 @@ static char * find_in_path(char * command, char ** envp)
                 return NULL;
             }
 
-            if (stat(cmd, &sb) == 0)
+            if (access(cmd, mode) == 0)
             {
-                /* Check if file exist in path & have permission to execute */
-                if (S_ISREG(sb.st_mode) && (sb.st_mode & 0000111))
-                {
-                    free(cp_path);
-                    return cmd;
-                }
+                free(cp_path);
+                return cmd;
             }
             free(cmd);
 
@@ -560,7 +674,7 @@ static char * find_editor(char ** envp)
     /* Try to search for VI editor */
     if (editor == NULL)
     {
-        return find_in_path("vi", envp);
+        return find_in_path("vi", envp, X_OK);
     }
 
     return strdup(editor);
