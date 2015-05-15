@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <memory.h>
@@ -32,7 +33,6 @@ static char * runas_user = NULL;
 static char * runas_group = NULL;
 static char ** users = NULL;
 static char * user = NULL;
-static char * cwd = NULL;
 static char ** envp = NULL;
 static bool use_sudoedit = false;  // sudoedit mode
 static bool always_auth = false;   // always authorise before new command is added
@@ -102,12 +102,11 @@ static void print_command(command_data * command, bool verbose)
     }
 
     /* Other command */
-
     char ** argv = command->argv;
 
     while (*argv)
     {
-        if (argv == command->argv)
+        if (argv == command->argv)  //  == argv[0]
         {
             sudo_log(SUDO_CONV_INFO_MSG, "%s", command->file);
         }
@@ -143,7 +142,7 @@ static void print_command(command_data * command, bool verbose)
 }
 
 /*
-Reads data (users) from conf file
+Reads data (users, always_auth) from conf file
 */
 static int load_config()
 {
@@ -183,6 +182,19 @@ static int load_config()
             // set null instead of new line character
             buffer[len - 1] = '\0';
 
+            if (str_case_starts(buffer, "always_auth ") && (size_t)len > strlen("always_auth ")) // parsing "user xxx"
+            {
+                char * value = rem_whitespace(buffer + strlen("always_auth "));
+
+                if (strcasecmp(value,"true") == 0 || strcmp(value,"1") == 0)
+                {
+                    always_auth = true;
+                }
+                else if (strcasecmp(value,"false") == 0 || strcmp(value,"0") == 0)
+                {
+                    always_auth = false;
+                }
+            }
             if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user ")) // parsing "user xxx"
             {
                 char * user_name = strdup(rem_whitespace(buffer + strlen("user ")));
@@ -237,8 +249,11 @@ static int load_config()
                 }
 
                 // get user struct
-                uid_t id = strtol(user_id, NULL, 10);
-                if (id == 0L)
+                char *p;
+                errno = 0;
+                uid_t id = strtol(user_id, &p, 10);
+
+                if (errno != 0 || *p != 0 || p == user_id)
                 {
                     sudo_log(SUDO_CONV_ERROR_MSG, "Invalid UID %s\n", user_id);
                     free(user_id);
@@ -369,22 +384,17 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
         if (str_case_starts(*ui, "runas_user="))
         {
             runas_user = *ui + sizeof("runas_user=") - 1;
-            break;
         }
-        if (str_case_starts(*ui, "runas_group="))
+        else if (str_case_starts(*ui, "runas_group="))
         {
             runas_group = *ui + sizeof("runas_group=") - 1;
-            break;
         }
-
-        // Check to see if sudo was called as sudoedit or with -e flag
-        if (strcasecmp(*ui, "sudoedit=true") == 0)
+        else if (strcasecmp(*ui, "sudoedit=true") == 0)
         {
             use_sudoedit = true;
         }
-
         /* Plugin doesn't support running sudo with no arguments. */
-        if (strcasecmp(*ui, "implied_shell=true") == 0)
+        else if (strcasecmp(*ui, "implied_shell=true") == 0)
         {
             return -2;
         }
@@ -395,11 +405,6 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
         if (str_case_starts(*ui, "user="))
         {
             user = *ui + sizeof("user=") - 1;
-            break;
-        }
-        if (str_case_starts(*ui, "cwd="))
-        {
-            cwd = *ui + sizeof("cwd=") - 1;
             break;
         }
     }
@@ -424,7 +429,7 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
 
     envp = (char **)user_env;
 
-    openlog("sudo", LOG_PID|LOG_CONS, LOG_USER); //LOG_AUTH?
+    openlog("sudo", LOG_PID|LOG_CONS, LOG_USER);
 
     if (!load_config())
     {
@@ -632,12 +637,11 @@ static command_data ** load()
 
     size_t count = convert_from_bytes(int_buffer, 4);
 
-    if ( (count+1) * sizeof(command_data*) > SIZE_MAX || (cmds = malloc((count+1) * sizeof(command_data*))) == NULL )
+    if (count > (SIZE_MAX / sizeof(command_data*) - 1) || (cmds = malloc((count+1) * sizeof(command_data*))) == NULL )
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         return NULL;
     }
-
 
     /* Load each command */
     for (size_t i = 0; i < count; i++)
@@ -987,7 +991,7 @@ static int execute(command_data * command, bool as_root)
         {
             // wait
         }
-        return (WEXITSTATUS(status) == 0);
+        return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
 }
 
@@ -1072,8 +1076,8 @@ static int run_diff(command_data * commmand)
         return false;
     }
 
-    char * file1 = commmand->argv[3];
-    char * file2 = commmand->argv[4];
+    char * file1 = commmand->argv[4];
+    char * file2 = commmand->argv[3];
 
     if (!file1 || !file2)
     {
@@ -1114,7 +1118,7 @@ static int run_diff(command_data * commmand)
         return false;
     }
 
-    sudo_log(SUDO_CONV_ERROR_MSG, "DIFF %s\n", file2);
+    sudo_log(SUDO_CONV_ERROR_MSG, "DIFF %s\n", file1);
 
     int result = execute(cmd, true);
 
@@ -1192,14 +1196,35 @@ static int sudoedit(char * orig_file)
     }
     else
     {
-        /* Change file to root (to prevent file edit) */
-        if (chown(temp_file, 0, 0) == -1)
+        char * old_temp_file = temp_file;
+
+        if (asprintf(&temp_file, "/var/tmp/%s-XXXXXX", orig_file_basename) < 0)
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file\n");
-            unlink(temp_file);
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+            free(old_temp_file);
+            return false;
+        }
+
+        fd = mkstemp(temp_file);
+        if (fd < 0)
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot create file\n");
+            free(old_temp_file);
             free(temp_file);
             return false;
         }
+
+        if (!copy_file(old_temp_file, fd))
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
+            close(fd);
+            unlink(old_temp_file);
+            free(old_temp_file);
+            free(temp_file);
+            return false;
+        }
+        close(fd);
+        free(old_temp_file);
 
         /* Save command: "mv -f -T /var/tmp/file-xxxxxx file" */
         char ** new_argv = malloc(6 * sizeof(char*));
@@ -1362,8 +1387,7 @@ static int auth_remove(command_data ** cmds, int i)
 
         if (cmds[i]->sudoedit && remove(cmds[i]->argv[3]) == -1)
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot remove file.\n");
-            return -1;
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot remove %s\n", cmds[i]->argv[3]);
         }
 
         char * com_argv = concat((char**) cmds[i]->argv, " ");
@@ -1418,15 +1442,6 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
     if (argc == 0 || !argv[0])
     {
         return -2;
-    }
-
-    if (!use_sudoedit)
-    {
-        // pri použití parametru -u chýba flag "sudoedit=true"
-        // https://www.dropbox.com/s/g8wwn4mrflsjdyq/sudoedit.jpg?dl=0
-        use_sudoedit = (strcmp(argv[0],"sudoedit") == 0) ||
-                       (strcmp(argv[0],"/bin/sudoedit") == 0) ||
-                       (strcmp(argv[0],"/usr/bin/sudoedit") == 0);
     }
 
     /* Exit after SIGINT */

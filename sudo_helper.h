@@ -108,7 +108,7 @@ static char * rem_whitespace(char * str)
 
     if (*c != '\0')
     {
-        c = '\0';
+        *c = '\0';
     }
 
     return str;
@@ -139,6 +139,9 @@ static size_t str_array_len(char ** array)
 
 /*
 Copy file (or create file)
+-1 = source file does not exist
+ 0 = error
+ 1 = success
 */
 static int copy_file(char * from, int target_fd)
 {
@@ -288,7 +291,7 @@ Save int to binary file
 */
 static bool save_int(size_t value, int bytes, int fd)
 {
-    char val1, val2, val3, val4;
+    unsigned char val1, val2, val3, val4;
 
     switch (bytes)
     {
@@ -352,9 +355,7 @@ static bool load_string(int fd, char ** str)
         return true;
     }
 
-    // Load string
-    // <length:4bytes><string>
-
+    // Load string <length:4bytes><string>
     if ((string = malloc(sizeof(char) * len)) == NULL)
     {
         return false;
@@ -616,6 +617,20 @@ static char * find_in_path(char * command, char ** envp, int mode)
         while (token)
         {
             if (strcmp(token,".") == 0)
+            {
+                char * cwd = get_current_dir_name();
+                if (!cwd)
+                {
+                    return NULL;
+                }
+                if (asprintf(&cmd, "%s/%s", cwd, command) < 0)
+                {
+                    free(cwd);
+                    return NULL;
+                }
+                free(cwd);
+            }
+            else if (token[0] == '\0')
             {
                 char * cwd = get_current_dir_name();
                 if (!cwd)
