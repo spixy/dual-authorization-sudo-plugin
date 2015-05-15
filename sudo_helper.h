@@ -140,7 +140,7 @@ static size_t str_array_len(char ** array)
 /*
 Copy file (or create file)
 */
-static bool copy_file(char * from, int target_fd)
+static int copy_file(char * from, int target_fd)
 {
     int source_fd;
     struct stat s;
@@ -149,37 +149,40 @@ static bool copy_file(char * from, int target_fd)
     /* Source file does not exist, do not need to copy */
     if ((source_fd = open(from, O_RDONLY)) == -1)
     {
-        return true;
+        return -1;
     }
 
     if (fstat(source_fd, &s) < 0)
     {
         close(source_fd);
-        return false;
+        return 0;
     }
 
-    bool result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : true;
+    int result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : 1;
 
     close(source_fd);
     return result;
 }
 
 /*
-Compares files
--1 = error
- 0 = not same
- 1 = same
+Compare files
 */
-static int cmp_files(char * oldFile, char * newFile)
+static bool cmp_files(char * oldFile, char * newFile)
 {
-    int ch1, ch2, result = 1;
+    int ch1, ch2;
+    bool result = true;
 
     FILE * fp1 = fopen(oldFile, "r");
-    FILE * fp2 = fopen(newFile, "r");
-
-    if (!fp1 || !fp2)
+    if (!fp1)
     {
-        return -1;
+        return false;
+    }
+
+    FILE * fp2 = fopen(newFile, "r");
+    if (!fp2)
+    {
+        fclose(fp2);
+        return false;
     }
 
     do
@@ -189,7 +192,7 @@ static int cmp_files(char * oldFile, char * newFile)
 
         if (ch1 != ch2)
         {
-            result = 0;
+            result = false;
             break;
         }
     } while (ch1 != EOF);

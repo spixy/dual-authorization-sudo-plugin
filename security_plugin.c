@@ -1132,16 +1132,17 @@ static int sudoedit(char * orig_file)
         return false;
     }
 
+    char * orig_file_basename = basename(orig_file);
     char * temp_file;
+    int result;
 
-    if (asprintf(&temp_file, "%s-XXXXXX", orig_file) < 0)
+    if (!orig_file_basename || asprintf(&temp_file, "/var/tmp/%s-XXXXXX", orig_file_basename) < 0)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         return false;
     }
 
     int fd = mkstemp(temp_file);
-
     if (fd < 0)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot create file\n");
@@ -1149,15 +1150,22 @@ static int sudoedit(char * orig_file)
         return false;
     }
 
-    if (! copy_file(orig_file, fd))
+    result = copy_file(orig_file, fd);
+    close(fd);
+
+    if (result == -1)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "File does not exist\n");
+        free(temp_file);
+        return false;
+    }
+    if (result == 0)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
-        close(fd);
         unlink(temp_file);
         free(temp_file);
         return false;
     }
-    close(fd);
 
     if (chown(temp_file, getpwnam(user)->pw_uid, getpwnam(user)->pw_gid) == -1 || chmod(temp_file, S_IRUSR | S_IWUSR) == -1)
     {
@@ -1175,27 +1183,16 @@ static int sudoedit(char * orig_file)
         return false;
     }
 
-    /* Changes */
-    int result = cmp_files(orig_file, temp_file);
-
-    // error
-    if (result == -1)
-    {
-        unlink(temp_file);
-        free(temp_file);
-        return false;
-    }
-    //no changes
-    else if (result == 1)
+    /* Changes in file? */
+    if (cmp_files(orig_file, temp_file))
     {
         unlink(temp_file);
         free(temp_file);
         return true;
     }
-    // changes
-    else if (result == 0)
+    else
     {
-        /* Change file to root (to lock file edit) */
+        /* Change file to root (to prevent file edit) */
         if (chown(temp_file, 0, 0) == -1)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file\n");
@@ -1204,7 +1201,7 @@ static int sudoedit(char * orig_file)
             return false;
         }
 
-        /* Save command: "mv -f -T xxx.tmp xxx" */
+        /* Save command: "mv -f -T /var/tmp/file-xxxxxx file" */
         char ** new_argv = malloc(6 * sizeof(char*));
         if (!new_argv)
         {
@@ -1233,17 +1230,13 @@ static int sudoedit(char * orig_file)
             return false;
         }
 
-        result = append_command(path, new_argv, true, user);
+        bool result = append_command(path, new_argv, true, user);
 
         free(path);
         free_2d_null(new_argv);
         free(temp_file);
 
         return result;
-    }
-    else
-    {
-        return false;
     }
 }
 
