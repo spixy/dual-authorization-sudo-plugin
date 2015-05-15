@@ -7,6 +7,7 @@
 #include <pwd.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <syslog.h>
@@ -54,6 +55,7 @@ static command_data ** load();
 static int try_lock(char * file);
 static int check_pam();
 static int check_pam_result(int result);
+static void SIG_handler(int signal);
 static int PAM_conv (int, const struct pam_message**, struct pam_response**, void*);
 
 struct pam_conv PAM_converse =
@@ -72,7 +74,7 @@ static void print_command(command_data * command, bool verbose)
         return;
     }
 
-    /* Sudoedit mode */
+    /* Sudoedit */
     if (command->sudoedit)
     {
         if (verbose)
@@ -98,8 +100,9 @@ static void print_command(command_data * command, bool verbose)
         return;
     }
 
-    char ** argv;
-    argv = command->argv;
+    /* Other command */
+
+    char ** argv = command->argv;
 
     while (*argv)
     {
@@ -492,10 +495,9 @@ Save all commands to file
 static int save(command_data ** commands)
 {
     int tmp_fd;
-    char fileNameArray[] = PLUGIN_COMMANDS_TEMP_FILE;
-    char * fileName = mktemp(fileNameArray);
+    char fileName[] = PLUGIN_COMMANDS_TEMP_FILE;
 
-    if ( !fileName || (tmp_fd = open(fileName, O_RDWR | O_CREAT | O_EXCL, S_IWUSR | S_IRUSR)) == -1 )
+    if ((tmp_fd = mkstemp(fileName)) == -1)
     {
         return false;
     }
@@ -529,8 +531,8 @@ static int save(command_data ** commands)
         unlink(fileName);
         return false;
     }
-    close(tmp_fd);
 
+    close(tmp_fd);
     return true;
 }
 
@@ -553,9 +555,7 @@ static command_data * load_command(int fd)
         return NULL;
     }
 
-    command->argv = load_string_array(fd);
-
-    if (!command->argv)
+    if (!load_string_array(fd, &command->argv))
     {
         free_command(command);
         return NULL;
@@ -575,17 +575,13 @@ static command_data * load_command(int fd)
 
     command->sudoedit = sudoedit[0];
 
-    command->exec_by_users = load_string_array(fd);
-
-    if (!command->exec_by_users)
+    if (!load_string_array(fd, &command->exec_by_users))
     {
         free_command(command);
         return NULL;
     }
 
-    command->rem_by_users = load_string_array(fd);
-
-    if (!command->rem_by_users)
+    if (!load_string_array(fd, &command->rem_by_users))
     {
         free_command(command);
         return NULL;
@@ -635,7 +631,7 @@ static command_data ** load()
 
     size_t count = convert_from_bytes(int_buffer, 4);
 
-    if ( (cmds = malloc((count+1) * sizeof(command_data*))) == NULL )
+    if ( (count+1) * sizeof(command_data*) > SIZE_MAX || (cmds = malloc((count+1) * sizeof(command_data*))) == NULL )
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         return NULL;
@@ -1049,7 +1045,7 @@ static int run_editor(char * arg)
     cmd->user = strdup(getenv("USER"));
     cmd->home = strdup(getenv("HOME"));
     cmd->path = strdup(getenv("PATH"));
-    cmd->pwd  = strdup(getenv("PWD"));
+    cmd->pwd  = get_current_dir_name();
     cmd->runas_user = strdup(user);
 
     if (!cmd->argv[0] || !cmd->runas_user || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
@@ -1091,7 +1087,7 @@ static int run_diff(command_data * commmand)
         return false;
     }
 
-    cmd->argv = malloc(4 * sizeof(char*));
+    cmd->argv = malloc(5 * sizeof(char*));
     if (!cmd->argv)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
@@ -1101,15 +1097,16 @@ static int run_diff(command_data * commmand)
 
     cmd->file = strdup("/usr/bin/diff");
     cmd->argv[0] = strdup("diff");
-    cmd->argv[1] = strdup(file1);
-    cmd->argv[2] = strdup(file2);
-    cmd->argv[3] = NULL;
+    cmd->argv[1] = strdup("-u");
+    cmd->argv[2] = strdup(file1);
+    cmd->argv[3] = strdup(file2);
+    cmd->argv[4] = NULL;
     cmd->user = strdup(getenv("USER"));
     cmd->home = strdup(getenv("HOME"));
     cmd->path = strdup(getenv("PATH"));
-    cmd->pwd  = strdup(getenv("PWD"));
+    cmd->pwd  = get_current_dir_name();
 
-    if (!cmd-> file || !cmd->argv[0] || !cmd->argv[1] || !cmd->argv[2] || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
+    if (!cmd-> file || !cmd->argv[0] || !cmd->argv[1] || !cmd->argv[2] || !cmd->argv[3] || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         free_command(cmd);
@@ -1144,16 +1141,27 @@ static int sudoedit(char * orig_file)
 
     int fd = mkstemp(temp_file);
 
-    if (! copy_file(orig_file, fd))
+    if (fd < 0)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot create file\n");
         free(temp_file);
         return false;
     }
 
+    if (! copy_file(orig_file, fd))
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
+        close(fd);
+        unlink(temp_file);
+        free(temp_file);
+        return false;
+    }
+    close(fd);
+
     if (chown(temp_file, getpwnam(user)->pw_uid, getpwnam(user)->pw_gid) == -1 || chmod(temp_file, S_IRUSR | S_IWUSR) == -1)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file\n");
+        unlink(temp_file);
         free(temp_file);
         return false;
     }
@@ -1392,6 +1400,23 @@ static int auth_remove(command_data ** cmds, int i)
 }
 
 /*
+Handle signals
+*/
+static void SIG_handler(int signal)
+{
+    if (commands_fd != -1)
+    {
+        flock(commands_fd, LOCK_UN);
+        close(commands_fd);
+    }
+
+    syslog(LOG_INFO, "exiting after received signal %d", signal);
+    closelog();
+
+    exit(signal);
+}
+
+/*
 Function is called by sudo to determine whether the user is allowed to run the specified commands.
 */
 static int sudo_check_policy(int argc, char * const argv[], char *env_add[], char **command_info[], char **argv_out[], char **user_env_out[])
@@ -1409,6 +1434,9 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
                        (strcmp(argv[0],"/bin/sudoedit") == 0) ||
                        (strcmp(argv[0],"/usr/bin/sudoedit") == 0);
     }
+
+    /* Exit after SIGINT */
+    signal(SIGINT, SIG_handler);
 
     if (strcmp(argv[0],"auth") == 0 || strcmp(argv[0],"list") == 0)
     {
@@ -1446,10 +1474,6 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             return 0;
         }
 
-        size_t length = commands_array_len(cmds);
-        int show_only = (strcmp(argv[0],"list") == 0);
-        int mode = (argc > 1 && strcmp(argv[1],"verbose") == 0);
-
         /* Prepare conversation */
         struct sudo_conv_message msgs[1];
         struct sudo_conv_reply replies[1];
@@ -1460,11 +1484,15 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
             return -1;
         }
-
         msgs[0].msg = message;
         msgs[0].msg_type = SUDO_CONV_PROMPT_ECHO_ON;
 
-        size_t i = 0, index = 1;
+        size_t length = commands_array_len(cmds);
+        int show_only = (strcmp(argv[0],"list") == 0);
+        int mode = (argc > 1 && strcmp(argv[1],"verbose") == 0);
+        size_t i = 0;
+        size_t index = 1;
+
         while (cmds[i])
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "%s%u/%u: ", show_only ? "" : "\n", index, length);
@@ -1620,9 +1648,15 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
     command->user = getenv("USER");
     command->home = getenv("HOME");
     command->path = getenv("PATH");
-    command->pwd  = getenv("PWD");
+    command->pwd  = get_current_dir_name();
     command->runas_user = runas_user;
     command->runas_group = runas_group;
+
+    if (!command->pwd)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        return false;
+    }
 
     if (authorised_by)
     {
@@ -1630,6 +1664,7 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
         if (!exec_by_user)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+            free(command->pwd);
             return false;
         }
         command->exec_by_users = add_string(command->exec_by_users, exec_by_user);
@@ -1645,6 +1680,7 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
             free_commands_null(cmds);
+            free(command->pwd);
             return false;
         }
 
@@ -1662,7 +1698,7 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
         if ((cmds_save = malloc(2 * sizeof(command_data*))) == NULL)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-            free_commands_null(cmds);
+            free(command->pwd);
             return false;
         }
         cmds_save[0] = command;
@@ -1673,6 +1709,8 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
 
         free(cmds_save);
     }
+
+    free(command->pwd);
 
     if (!result)
     {

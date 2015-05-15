@@ -82,7 +82,7 @@ static char * concat(char ** array, char * separator)
     {
         strcat(str, *current);
 
-        if (*(++current))
+        if (*(++current) && separator)
         {
             strcat(str, separator);
         }
@@ -103,7 +103,7 @@ static char * rem_whitespace(char * str)
 
     char * c = str;
 
-    while (*c != '\0' && !isspace(*c))
+    while (*c != '\0' && !isspace((unsigned char)*c))
     {
         ++c;
     }
@@ -144,40 +144,25 @@ Copy file (or create file)
 */
 static bool copy_file(char * from, int target_fd)
 {
-    int source_fd; //, target_fd;
+    int source_fd;
     struct stat s;
     off_t offset = 0;
 
-    source_fd = open(from, O_RDONLY);
-
-    /*if ((target_fd = open(to, O_RDWR | O_CREAT | O_EXCL, S_IWUSR | S_IRUSR)) == -1)
-    {
-        if (source_fd != -1)
-        {
-            close(source_fd);
-        }
-        return false;
-    }*/
-
     /* Source file does not exist, do not need to copy */
-    if (source_fd == -1)
+    if ((source_fd = open(from, O_RDONLY)) == -1)
     {
-        close(target_fd);
         return true;
     }
 
     if (fstat(source_fd, &s) < 0)
     {
         close(source_fd);
-        close(target_fd);
         return false;
     }
 
     bool result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : true;
 
     close(source_fd);
-    close(target_fd);
-
     return result;
 }
 
@@ -300,7 +285,7 @@ static size_t convert_from_bytes(unsigned char * array, size_t bytes)
 /*
 Save int to binary file
 */
-static int save_int(size_t value, int bytes, int fd)
+static bool save_int(size_t value, int bytes, int fd)
 {
     char val1, val2, val3, val4;
 
@@ -326,7 +311,7 @@ static int save_int(size_t value, int bytes, int fd)
 /*
 Save string to binary file
 */
-static int save_string(char * str, int fd)
+static bool save_string(char * str, int fd)
 {
     if (str)
     {
@@ -347,7 +332,7 @@ static int save_string(char * str, int fd)
 /*
 Load string from binary file and save to str
 */
-static int load_string(int fd, char ** str)
+static bool load_string(int fd, char ** str)
 {
     unsigned char int_buffer[4];
     char * string;
@@ -394,9 +379,8 @@ static int load_string(int fd, char ** str)
 
 /*
 Load from file string array terminated by NULL
-if error return NULL
 */
-static char ** load_string_array(int fd)
+static bool load_string_array(int fd, char *** str_array)
 {
     unsigned char int_buffer[2];
     char ** array;
@@ -404,17 +388,23 @@ static char ** load_string_array(int fd)
     /* Arguments count */
     if (read(fd, int_buffer, 2) != 2)
     {
-        return NULL;
+        return false;
     }
 
-    size_t argc = convert_from_bytes(int_buffer, 2);
+    size_t len = convert_from_bytes(int_buffer, 2);
 
-    if ( (array = malloc((argc+1)*sizeof(char*))) == NULL )
+    if (len == 0)
     {
-        return NULL;
+        *str_array = NULL;
+        return true;
     }
 
-    for (size_t i = 0; i < argc; i++)
+    if ( (array = malloc((len+1)*sizeof(char*))) == NULL )
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < len; i++)
     {
         char * str = NULL;
 
@@ -422,15 +412,17 @@ static char ** load_string_array(int fd)
         {
             array[i] = NULL;
             free_2d_null(array);
-            return NULL;
+            return false;
         }
 
         array[i] = str;
     }
 
-    array[argc] = NULL;
+    array[len] = NULL;
 
-    return array;
+    *str_array = array;
+
+    return true;
 }
 
 /*
@@ -622,10 +614,27 @@ static char * find_in_path(char * command, char ** envp, int mode)
 
         while (token)
         {
-            if (asprintf(&cmd, "%s/%s", token, command) < 0)
+            if (strcmp(token,".") == 0)
             {
-                free(cp_path);
-                return NULL;
+                char * cwd = get_current_dir_name();
+                if (!cwd)
+                {
+                    return NULL;
+                }
+                if (asprintf(&cmd, "%s/%s", cwd, command) < 0)
+                {
+                    free(cwd);
+                    return NULL;
+                }
+                free(cwd);
+            }
+            else
+            {
+                if (asprintf(&cmd, "%s/%s", token, command) < 0)
+                {
+                    free(cp_path);
+                    return NULL;
+                }
             }
 
             if (access(cmd, mode) == 0)
@@ -640,26 +649,6 @@ static char * find_in_path(char * command, char ** envp, int mode)
         };
     }
     free(cp_path);
-
-    /* PWD */
-    char * cwd = get_current_dir_name();
-    if (!cwd)
-    {
-        return NULL;
-    }
-
-    if (asprintf(&cmd, "%s/%s", cwd, command) < 0)
-    {
-        free(cwd);
-        return NULL;
-    }
-    free(cwd);
-
-    if (access(cmd, mode) == 0)
-    {
-        return cmd;
-    }
-    free(cmd);
 
     for (char ** ep = envp; *ep != NULL; ep++)
     {
