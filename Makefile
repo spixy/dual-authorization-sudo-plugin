@@ -15,7 +15,8 @@ OUTPUT2=/usr/libexec/sudo
 CC=gcc
 
 # flags
-FLAGS=-std=gnu99 -lpam -lpam_misc -fPIC -shared -D_FORTIFY_SOURCE=2
+FLAGS=-std=gnu99 -lpam -lpam_misc -fPIC -shared
+#-D_FORTIFY_SOURCE=2
 DFLAGS=-Wall -Wextra
 
 build: ${TARGET}
@@ -24,18 +25,16 @@ build: ${TARGET}
 install: build
 	cp ${TARGET} ${OUTPUT2}
 	#mkdir /var/lib/sudo_security_plugin
-	#[ -e "/etc/sudo.conf" ] && mv -f /etc/sudo.conf /etc/sudo.conf.bak
+	#mv -f /etc/sudo.conf /etc/sudo.conf.bak
 	echo "Plugin sudoers_policy security_plugin.so" > /etc/sudo.conf
 
 
 # uninstall, root only
 uninstall:
 	rm -f /usr/local/libexec/${TARGET}
-	#rm -rf /etc/sudo_security_plugin/
-	#[ -e "/etc/sudo_security_plugin.conf" ] && rm -f /etc/sudo_security_plugin.conf
-	#[ -e "/etc/sudo_security_plugin.conf~" ] && rm -f /etc/sudo_security_plugin.conf~
-	rm -f /etc/sudo.conf
-	#[ -e "/etc/sudo.conf.bak" ] && mv -f /etc/sudo.conf.bak /etc/sudo.conf
+	rm -rf /var/lib/sudo_security_plugin/
+	rmdir /var/lib/sudo_security_plugin/
+	mv -f /etc/sudo.conf.bak /etc/sudo.conf
 
 
 # clean

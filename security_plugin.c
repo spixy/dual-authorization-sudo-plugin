@@ -41,12 +41,12 @@ static int execute(command_data * command, bool as_root);
 static int run_editor(char * arg);
 static int run_diff(command_data * commmand);
 static int load_config();
-static void print_command(command_data * command, int mode);
+static void print_command(command_data * command, bool verbose);
 static int auth_remove(command_data ** cmds, int i);
 static int auth_exec(command_data ** cmds, int i);
 static int save(command_data ** commands);
 static int save_command(command_data * command, int fd);
-static int append_command(char * file, char ** argv, char flag_sudoedit, char * authorised_by);
+static int append_command(char * file, char ** argv, bool flag_sudoedit, char * authorised_by);
 static int sudoedit(char * file);
 static command_data ** remove_command(command_data ** array, command_data * cmd);
 static command_data * load_command(int fd);
@@ -64,9 +64,8 @@ struct pam_conv PAM_converse =
 
 /*
 Prints command with arguments
-mode: 0=normal, 1=full, 2=sudoedit
 */
-static void print_command(command_data * command, int mode)
+static void print_command(command_data * command, bool verbose)
 {
     if (!command || !command->argv)
     {
@@ -74,17 +73,27 @@ static void print_command(command_data * command, int mode)
     }
 
     /* Sudoedit mode */
-    if (mode == 2)
+    if (command->sudoedit)
     {
-        run_diff(command);
-        char * exec_by_users = concat(command->exec_by_users, ",");
-        char * rem_by_users = concat(command->rem_by_users, ",");
+        if (verbose)
+        {
+            run_diff(command);
 
-        sudo_log(SUDO_CONV_INFO_MSG, "\nAuthorised to execute: %s\n", (exec_by_users ? exec_by_users : NO_USER));
-        sudo_log(SUDO_CONV_INFO_MSG, "Authorised to remove: %s\n", (rem_by_users ? rem_by_users : NO_USER));
+            char * exec_by_users = concat(command->exec_by_users, ",");
+            char * rem_by_users = concat(command->rem_by_users, ",");
 
-        free(exec_by_users);
-        free(rem_by_users);
+            sudo_log(SUDO_CONV_INFO_MSG,
+                "Authorised to execute:%s Authorised to remove:%s\n",
+                (exec_by_users ? exec_by_users : NO_USER),
+                (rem_by_users ? rem_by_users : NO_USER));
+
+            free(exec_by_users);
+            free(rem_by_users);
+        }
+        else
+        {
+            sudo_log(SUDO_CONV_INFO_MSG, "sudoedit %s\n", command->argv[4]);
+        }
 
         return;
     }
@@ -107,7 +116,7 @@ static void print_command(command_data * command, int mode)
 
     sudo_log(SUDO_CONV_INFO_MSG, "\n");
 
-    if (mode == 1)
+    if (verbose)
     {
         char * exec_by_users = concat(command->exec_by_users, ",");
         char * rem_by_users = concat(command->rem_by_users, ",");
@@ -116,12 +125,13 @@ static void print_command(command_data * command, int mode)
             sudo_log(SUDO_CONV_INFO_MSG,"Run as user:%s ",command->runas_user);
         if (command->runas_group)
             sudo_log(SUDO_CONV_INFO_MSG,"Run as group:%s ",command->runas_group);
-        if (command->sudoedit)
-            sudo_log(SUDO_CONV_INFO_MSG,"Sudoedit:yes ");
 
-        sudo_log(SUDO_CONV_INFO_MSG, "USER:%s PWD:%s\n", command->user, command->pwd);
-        sudo_log(SUDO_CONV_INFO_MSG, "Authorised to execute:%s\n", (exec_by_users ? exec_by_users : NO_USER));
-        sudo_log(SUDO_CONV_INFO_MSG, "Authorised to remove:%s\n", (rem_by_users ? rem_by_users : NO_USER));
+        sudo_log(SUDO_CONV_INFO_MSG,
+                "USER:%s PWD:%s Authorised to execute:%s Authorised to remove:%s\n",
+                command->user,
+                command->pwd,
+                (exec_by_users ? exec_by_users : NO_USER),
+                (rem_by_users ? rem_by_users : NO_USER));
 
         free(exec_by_users);
         free(rem_by_users);
@@ -824,15 +834,19 @@ static int PAM_conv(int num_msg, const struct pam_message **msg, struct pam_resp
                 }
                 msgs[0].msg = message;
 
-                sudo_conv(1, msgs, replies);
-
-                reply[i].resp = strdup(replies[0].reply);
-                if (!reply[i].resp)
+                if (sudo_conv(1, msgs, replies) == -1)
                 {
-                    return PAM_BUF_ERR;
+                    free(message);
+                    return PAM_CONV_ERR;
                 }
 
                 reply[i].resp_retcode = 0;
+                reply[i].resp = strdup(replies[0].reply);
+                if (!reply[i].resp)
+                {
+                    free(message);
+                    return PAM_BUF_ERR;
+                }
 
                 free(message);
                 free(replies[0].reply);
@@ -1010,8 +1024,25 @@ static int run_editor(char * arg)
 
     /* Run text editor */
     command_data * cmd = make_command();
-    cmd->file = editor;
+    if (!cmd)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        free(editor);
+        free(file);
+        return false;
+    }
+
     cmd->argv = malloc(3 * sizeof(char*));
+    if (!cmd->argv)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        free(editor);
+        free(file);
+        free(cmd);
+        return false;
+    }
+
+    cmd->file = editor;
     cmd->argv[0] = x_strdup(basename(editor));
     cmd->argv[1] = file;
     cmd->argv[2] = NULL;
@@ -1019,8 +1050,14 @@ static int run_editor(char * arg)
     cmd->home = strdup(getenv("HOME"));
     cmd->path = strdup(getenv("PATH"));
     cmd->pwd  = strdup(getenv("PWD"));
+    cmd->runas_user = strdup(user);
 
-    cmd->runas_user = x_strdup(user);
+    if (!cmd->argv[0] || !cmd->runas_user || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        free_command(cmd);
+        return false;
+    }
 
     int result = execute(cmd, false);
 
@@ -1033,7 +1070,7 @@ DIFF function for sudoedit
 */
 static int run_diff(command_data * commmand)
 {
-    if (!commmand || !commmand->argv)
+    if (!commmand || !commmand->argv || str_array_len(commmand->argv) < 5)
     {
         return false;
     }
@@ -1048,8 +1085,21 @@ static int run_diff(command_data * commmand)
 
     /* Run diff */
     command_data * cmd = make_command();
-    cmd->file = strdup("/usr/bin/diff");
+    if (!cmd)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        return false;
+    }
+
     cmd->argv = malloc(4 * sizeof(char*));
+    if (!cmd->argv)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        free(cmd);
+        return false;
+    }
+
+    cmd->file = strdup("/usr/bin/diff");
     cmd->argv[0] = strdup("diff");
     cmd->argv[1] = strdup(file1);
     cmd->argv[2] = strdup(file2);
@@ -1058,6 +1108,13 @@ static int run_diff(command_data * commmand)
     cmd->home = strdup(getenv("HOME"));
     cmd->path = strdup(getenv("PATH"));
     cmd->pwd  = strdup(getenv("PWD"));
+
+    if (!cmd-> file || !cmd->argv[0] || !cmd->argv[1] || !cmd->argv[2] || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
+    {
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+        free_command(cmd);
+        return false;
+    }
 
     sudo_log(SUDO_CONV_ERROR_MSG, "DIFF %s\n", file2);
 
@@ -1070,89 +1127,89 @@ static int run_diff(command_data * commmand)
 /*
 Creates copy of file, open it with editor, save to list
 */
-static int sudoedit(char * file)
+static int sudoedit(char * orig_file)
 {
-    if (!file)
+    if (!orig_file)
     {
         return false;
     }
 
-    char * orig_file_path;
+    char * temp_file;
 
-    if ((orig_file_path = find_in_path(file, envp, F_OK)) == NULL)
-    {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot find file.\n");
-        return -1;
-    }
-
-    char * orig_file = basename(orig_file_path);
-    char * temp_file_path;
-    char * temp_file_template;
-
-    if (asprintf(&temp_file_template, "/var/%s-XXXXXX", orig_file) < 0)
+    if (asprintf(&temp_file, "%s-XXXXXX", orig_file) < 0)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-        return -1;
+        return false;
     }
 
-    temp_file_path = mktemp(temp_file_template);
+    int fd = mkstemp(temp_file);
 
-    /* Copy file xxx to xxx.tmp */
-    if (! copy_file(orig_file_path, temp_file_path))
+    if (! copy_file(orig_file, fd))
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file.\n");
-        free(temp_file_template);
-        return -1;
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
+        free(temp_file);
+        return false;
     }
 
-    if (chown(temp_file_path, getpwnam(user)->pw_uid, getpwnam(user)->pw_gid) == -1 || chmod(temp_file_path, S_IRUSR | S_IWUSR) == -1)
+    if (chown(temp_file, getpwnam(user)->pw_uid, getpwnam(user)->pw_gid) == -1 || chmod(temp_file, S_IRUSR | S_IWUSR) == -1)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file.\n");
-        free(temp_file_template);
-        return -1;
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file\n");
+        free(temp_file);
+        return false;
     }
 
     /* Run text editor */
-    if (! run_editor(temp_file_path))
+    if (! run_editor(temp_file))
     {
-        unlink(temp_file_path);
-        free(temp_file_template);
-        return -1;
+        unlink(temp_file);
+        free(temp_file);
+        return false;
     }
 
     /* Changes */
-    int result = cmp_files(orig_file_path, temp_file_path);
+    int result = cmp_files(orig_file, temp_file);
 
     // error
     if (result == -1)
     {
-        unlink(temp_file_path);
-        free(temp_file_template);
+        unlink(temp_file);
+        free(temp_file);
         return false;
     }
     //no changes
     else if (result == 1)
     {
-        unlink(temp_file_path);
-        free(temp_file_template);
-        return false;
+        unlink(temp_file);
+        free(temp_file);
+        return true;
     }
     // changes
     else if (result == 0)
     {
+        /* Change file to root (to lock file edit) */
+        if (chown(temp_file, 0, 0) == -1)
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file\n");
+            unlink(temp_file);
+            free(temp_file);
+            return false;
+        }
+
         /* Save command: "mv -f -T xxx.tmp xxx" */
         char ** new_argv = malloc(6 * sizeof(char*));
         if (!new_argv)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-            return -1;
+            unlink(temp_file);
+            free(temp_file);
+            return false;
         }
 
         new_argv[0] = strdup("mv");
         new_argv[1] = strdup("-f");
         new_argv[2] = strdup("-T");
-        new_argv[3] = strdup(temp_file_path);
-        new_argv[4] = strdup(orig_file_path);
+        new_argv[3] = strdup(temp_file);
+        new_argv[4] = strdup(orig_file);
         new_argv[5] = NULL;
 
         char * path = strdup("/usr/bin/mv");
@@ -1160,16 +1217,19 @@ static int sudoedit(char * file)
         if (!path || !new_argv[0] || !new_argv[1] || !new_argv[2] || !new_argv[3] || !new_argv[4])
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-            free_2d_null(new_argv);
+            unlink(temp_file);
             free(path);
-            return -1;
+            free(temp_file);
+            free_2d_null(new_argv);
+            return false;
         }
 
         result = append_command(path, new_argv, true, user);
 
         free(path);
         free_2d_null(new_argv);
-        free(temp_file_template);
+        free(temp_file);
+
         return result;
     }
     else
@@ -1298,14 +1358,11 @@ static int auth_remove(command_data ** cmds, int i)
         str_array_len(cmds[i]->rem_by_users) == MIN_AUTH_USERS)  // two admins already authorised
     {
 
-        if (cmds[i]->sudoedit == 2 && remove(cmds[i]->argv[3]) == -1)
+        if (cmds[i]->sudoedit && remove(cmds[i]->argv[3]) == -1)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot remove file.\n");
             return -1;
         }
-
-        // remove command
-        cmds = remove_command(cmds, cmds[i]);
 
         char * com_argv = concat((char**) cmds[i]->argv, " ");
         char * rem_by_users = concat((char**) cmds[i]->rem_by_users, " ");
@@ -1315,6 +1372,9 @@ static int auth_remove(command_data ** cmds, int i)
         }
         free(com_argv);
         free(rem_by_users);
+
+        // remove command
+        cmds = remove_command(cmds, cmds[i]);
 
         // save commands
         if (!save(cmds))
@@ -1339,6 +1399,15 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
     if (argc == 0 || !argv[0])
     {
         return -2;
+    }
+
+    if (!use_sudoedit)
+    {
+        // pri použití parametru -u chýba flag "sudoedit=true"
+        // https://www.dropbox.com/s/g8wwn4mrflsjdyq/sudoedit.jpg?dl=0
+        use_sudoedit = (strcmp(argv[0],"sudoedit") == 0) ||
+                       (strcmp(argv[0],"/bin/sudoedit") == 0) ||
+                       (strcmp(argv[0],"/usr/bin/sudoedit") == 0);
     }
 
     if (strcmp(argv[0],"auth") == 0 || strcmp(argv[0],"list") == 0)
@@ -1409,11 +1478,15 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             }
             else
             {
-                mode = (cmds[i]->sudoedit) ? 2 : 1;
-                print_command(cmds[i], mode);
+                print_command(cmds[i], true);
             }
 
-            sudo_conv(1, msgs, replies);
+            if (sudo_conv(1, msgs, replies) == -1)
+            {
+                free_commands_null(cmds);
+                free(message);
+                return -1;
+            }
 
             /* Execute */
             if (strcasecmp(replies[0].reply,"e") == 0)
@@ -1506,7 +1579,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
         char * authorised_by = NULL;
 
-        /* Is user allowed to authorise => Authenticate user */
+        /* If user allowed to authorise => Authenticate user */
         if (array_null_contains(users, user) && check_pam(user))
         {
             authorised_by = user;
@@ -1530,7 +1603,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 /*
 Create command from arguments and append to list of commands
 */
-static int append_command(char * file, char ** argv, char flag_sudoedit, char * authorised_by)
+static int append_command(char * file, char ** argv, bool flag_sudoedit, char * authorised_by)
 {
     int result;
     command_data * command = make_command();

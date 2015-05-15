@@ -2,6 +2,7 @@
 #define SUDO_HELPER_INCLUDED
 
 #include <stdint.h>
+#include <limits.h>
 
 #define PLUGIN_NAME                     "Sudo Dual Authorization Security Plugin"
 #define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
@@ -59,10 +60,9 @@ static char * concat(char ** array, char * separator)
 
     char * str = NULL;
     size_t total_length = 0;
-    size_t separator_length = (separator) ? strlen(separator) : 0;
+    size_t separator_length = (separator) ? strlen(separator) : 1;  // 1 for '0'
 
-    char ** current;
-    current = array;
+    char ** current = array;
 
     while (*current != NULL)
     {
@@ -70,13 +70,12 @@ static char * concat(char ** array, char * separator)
         current++;
     }
 
-    if ((str = malloc(total_length)) == NULL)
+    if (total_length == 0 || (str = malloc(total_length)) == NULL)
     {
         return NULL;
     }
 
     str[0] = '\0';
-
     current = array;
 
     while (*current != NULL)
@@ -97,20 +96,24 @@ Removes whitespaces from string
 */
 static char * rem_whitespace(char * str)
 {
-    return str;
-    /*if (!str)
+    if (!str)
     {
         return NULL;
     }
 
     char * c = str;
 
-    while (isspace(*c))
+    while (*c != '\0' && !isspace(*c))
     {
         ++c;
     }
 
-    return c;*/
+    if (*c != '\0')
+    {
+        c = '\0';
+    }
+
+    return str;
 }
 
 /*
@@ -125,8 +128,7 @@ static size_t str_array_len(char ** array)
 
     size_t len = 0;
 
-    char ** str;
-    str = array;
+    char ** str = array;
 
     while (*str != NULL)
     {
@@ -140,34 +142,28 @@ static size_t str_array_len(char ** array)
 /*
 Copy file (or create file)
 */
-static int copy_file(char * from, char * to)
+static bool copy_file(char * from, int target_fd)
 {
-    int source_fd;
-    int target_fd;
+    int source_fd; //, target_fd;
     struct stat s;
     off_t offset = 0;
 
-    /* File does not exist */
-    if (!access(from, F_OK))
+    source_fd = open(from, O_RDONLY);
+
+    /*if ((target_fd = open(to, O_RDWR | O_CREAT | O_EXCL, S_IWUSR | S_IRUSR)) == -1)
     {
-        if ((target_fd = mkostemp(to, O_RDWR | O_CREAT | O_EXCL)) == -1)
+        if (source_fd != -1)
         {
-            return false;
+            close(source_fd);
         }
+        return false;
+    }*/
+
+    /* Source file does not exist, do not need to copy */
+    if (source_fd == -1)
+    {
         close(target_fd);
         return true;
-    }
-
-    /* Copy file */
-    if ((source_fd = open(from, O_RDONLY)) == -1)
-    {
-        return false;
-    }
-
-    if ((target_fd = mkostemp(to, O_RDWR | O_CREAT | O_EXCL)) == -1)
-    {
-        close(source_fd);
-        return false;
     }
 
     if (fstat(source_fd, &s) < 0)
@@ -177,7 +173,7 @@ static int copy_file(char * from, char * to)
         return false;
     }
 
-    int result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : true;
+    bool result = (s.st_size > 0) ? (sendfile(target_fd, source_fd, &offset, s.st_size) == s.st_size) : true;
 
     close(source_fd);
     close(target_fd);
@@ -228,8 +224,7 @@ static size_t commands_array_len(command_data ** array)
 {
     size_t len = 0;
 
-    command_data ** cmd;
-    cmd = array;
+    command_data ** cmd = array;
 
     while (*cmd)
     {
@@ -268,8 +263,7 @@ static void free_2d_null(char ** array)
         return;
     }
 
-    char ** str;
-    str = array;
+    char ** str = array;
 
     while (*str)
     {
@@ -331,27 +325,27 @@ static int save_int(size_t value, int bytes, int fd)
 
 /*
 Save string to binary file
-<length:4bytes><string>
 */
 static int save_string(char * str, int fd)
 {
     if (str)
     {
-        size_t len = strlen(str) + 1;
+        // <length:4bytes><string>
+        size_t length = strlen(str) + 1;
 
-        return (len <= MAX_4_BYTES &&
-                save_int(len, 4, fd) &&
-                write(fd, str, len) == (ssize_t)len);
+        return (length <= MAX_4_BYTES &&
+                save_int(length, 4, fd) &&
+                write(fd, str, length) == (ssize_t)length);
     }
     else
     {
+        // 0000 (4 bytes)
         return save_int(0, 4, fd);
     }
 }
 
 /*
 Load string from binary file and save to str
-<length:4bytes><string>
 */
 static int load_string(int fd, char ** str)
 {
@@ -365,18 +359,22 @@ static int load_string(int fd, char ** str)
 
     size_t len = convert_from_bytes(int_buffer, 4);
 
+    // Empty string
     if (len == 0)
     {
         *str = NULL;
         return true;
     }
 
+    // Load string
+    // <length:4bytes><string>
+
     if ((string = malloc(sizeof(char) * len)) == NULL)
     {
         return false;
     }
 
-    if (read(fd, string, sizeof(char) * len) != (ssize_t)len)
+    if (len > SSIZE_MAX || read(fd, string, sizeof(char) * len) != (ssize_t)len)
     {
         free(string);
         return false;
@@ -565,8 +563,7 @@ static bool array_null_contains(char ** array, const char * str)
         return false;
     }
 
-    char ** item;
-    item = array;
+    char ** item = array;
 
     while (*item)
     {
@@ -642,8 +639,37 @@ static char * find_in_path(char * command, char ** envp, int mode)
             token = strtok(NULL, ":");
         };
     }
-
     free(cp_path);
+
+    /* PWD */
+    char * cwd = get_current_dir_name();
+    if (!cwd)
+    {
+        return NULL;
+    }
+
+    if (asprintf(&cmd, "%s/%s", cwd, command) < 0)
+    {
+        free(cwd);
+        return NULL;
+    }
+    free(cwd);
+
+    if (access(cmd, mode) == 0)
+    {
+        return cmd;
+    }
+    free(cmd);
+
+    for (char ** ep = envp; *ep != NULL; ep++)
+    {
+        if (str_starts(*ep,"PATH="))
+        {
+            path = * ep + 5;
+            break;
+        }
+    }
+
     return NULL;
 }
 
@@ -662,8 +688,9 @@ static char * getenv_from_envp(char * name, char ** envp)
     {
         if (str_starts(*ep, key))
         {
+            size_t len = strlen(key);
             free(key);
-            return *ep + strlen(key) + 1;
+            return *ep + len + 1;
         }
     }
 
@@ -694,7 +721,12 @@ static char * find_editor(char ** envp)
     }
 
     /* Try to search for VIM editor */
-    return find_in_path("/usr/bin/vi", envp, X_OK);
+    if (access("/usr/bin/vi", X_OK) == 0)
+    {
+        return strdup("/usr/bin/vi");
+    }
+
+    return NULL;
 }
 
 #endif // SUDO_HELPER_INCLUDED
