@@ -34,7 +34,8 @@ static char ** users = NULL;
 static char * user = NULL;
 static char * cwd = NULL;
 static char ** envp = NULL;
-static char use_sudoedit = false;
+static bool use_sudoedit = false;  // sudoedit mode
+static bool always_auth = false;   // always authorise before new command is added
 static int commands_fd = -1;
 
 static char ** build_envp(command_data * command);
@@ -505,7 +506,7 @@ static int save(command_data ** commands)
     /* Commands count */
     size_t count = commands_array_len(commands);
 
-    if (count > MAX_4_BYTES || !save_int(count, 4, tmp_fd))
+    if (count > UINT32_MAX || !save_int(count, 4, tmp_fd))
     {
         close(tmp_fd);
         unlink(fileName);
@@ -667,7 +668,7 @@ static int save_command(command_data * command, int fd)
     int result = save_string(command->file, fd);
 
     /*  Arguments count  */
-    if ((argc = str_array_len(command->argv)) > MAX_2_BYTES)
+    if ((argc = str_array_len(command->argv)) > UINT16_MAX)
     {
         return false;
     }
@@ -691,7 +692,7 @@ static int save_command(command_data * command, int fd)
               save_string(command->pwd, fd);
 
     /*  exec_by_users  */
-    if ((argc = str_array_len(command->exec_by_users)) > MAX_2_BYTES)
+    if ((argc = str_array_len(command->exec_by_users)) > UINT16_MAX)
     {
         return false;
     }
@@ -706,7 +707,7 @@ static int save_command(command_data * command, int fd)
     }
 
     /*  rem_by_users  */
-    if ((argc = str_array_len(command->rem_by_users)) > MAX_2_BYTES)
+    if ((argc = str_array_len(command->rem_by_users)) > UINT16_MAX)
     {
         return false;
     }
@@ -1042,13 +1043,13 @@ static int run_editor(char * arg)
     cmd->argv[0] = x_strdup(basename(editor));
     cmd->argv[1] = file;
     cmd->argv[2] = NULL;
-    cmd->user = strdup(getenv("USER"));
+    cmd->user = strdup(user);
     cmd->home = strdup(getenv("HOME"));
     cmd->path = strdup(getenv("PATH"));
     cmd->pwd  = get_current_dir_name();
     cmd->runas_user = strdup(user);
 
-    if (!cmd->argv[0] || !cmd->runas_user || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
+    if (!cmd->argv[0] || !cmd->runas_user || !cmd->user || !cmd->home || !cmd->path || !cmd->pwd)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         free_command(cmd);
@@ -1101,12 +1102,12 @@ static int run_diff(command_data * commmand)
     cmd->argv[2] = strdup(file1);
     cmd->argv[3] = strdup(file2);
     cmd->argv[4] = NULL;
-    cmd->user = strdup(getenv("USER"));
+    cmd->user = strdup(user);
     cmd->home = strdup(getenv("HOME"));
     cmd->path = strdup(getenv("PATH"));
     cmd->pwd  = get_current_dir_name();
 
-    if (!cmd-> file || !cmd->argv[0] || !cmd->argv[1] || !cmd->argv[2] || !cmd->argv[3] || !cmd->user || !cmd->home || !cmd->path || !cmd-> pwd)
+    if (!cmd-> file || !cmd->argv[0] || !cmd->argv[1] || !cmd->argv[2] || !cmd->argv[3] || !cmd->user || !cmd->home || !cmd->path || !cmd->pwd)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         free_command(cmd);
@@ -1363,7 +1364,7 @@ static int auth_remove(command_data ** cmds, int i)
     }
 
     if ((strcmp(cmds[i]->user, user) == 0) ||                    // I wrote command (and I am admin)   OR
-        str_array_len(cmds[i]->rem_by_users) == MIN_AUTH_USERS)  // two admins already authorised
+        str_array_len(cmds[i]->rem_by_users) == MIN_AUTH_USERS)      // two admins already authorised
     {
 
         if (cmds[i]->sudoedit && remove(cmds[i]->argv[3]) == -1)
@@ -1607,8 +1608,15 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
         char * authorised_by = NULL;
 
+        if (always_auth)
+        {
+            if (!check_pam(user))
+            {
+                return -1;
+            }
+        }
         /* If user allowed to authorise => Authenticate user */
-        if (array_null_contains(users, user) && check_pam(user))
+        else if (array_null_contains(users, user) && check_pam(user))
         {
             authorised_by = user;
         }
@@ -1645,7 +1653,7 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
     command->file = file;
     command->argv = argv;
     command->sudoedit = flag_sudoedit;
-    command->user = getenv("USER");
+    command->user = user;
     command->home = getenv("HOME");
     command->path = getenv("PATH");
     command->pwd  = get_current_dir_name();

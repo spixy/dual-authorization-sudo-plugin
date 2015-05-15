@@ -10,8 +10,6 @@
 #define PLUGIN_COMMANDS_TEMP_FILE       "/var/lib/sudo_security_plugin/commands-XXXXXX"
 #define NO_USER                         "N/A"
 #define MIN_AUTH_USERS                   2
-#define MAX_2_BYTES                      UINT16_MAX
-#define MAX_4_BYTES                      UINT32_MAX
 #define PACKAGE_VERSION                  0.1
 
 #define QUOTE(name) #name
@@ -318,7 +316,7 @@ static bool save_string(char * str, int fd)
         // <length:4bytes><string>
         size_t length = strlen(str) + 1;
 
-        return (length <= MAX_4_BYTES &&
+        return (length <= UINT32_MAX &&
                 save_int(length, 4, fd) &&
                 write(fd, str, length) == (ssize_t)length);
     }
