@@ -1,0 +1,1 @@
+Environment that allows system management that is typically performed as the root user only if every operation is authorized by two different persons.
