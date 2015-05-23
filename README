@@ -9,3 +9,7 @@ run "make build"
 
 To clean temp files:
 run "make clean"
+
+![Screenshot](examples/sudo_example.png)
+
+[Configuration file example](examples/sudo_security_plugin.conf)
