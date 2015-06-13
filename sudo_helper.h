@@ -219,6 +219,11 @@ Return array size
 */
 static size_t commands_array_len(command_data ** array)
 {
+    if (!array)
+    {
+        return 0;
+    }
+
     size_t len = 0;
 
     command_data ** cmd = array;
@@ -316,7 +321,7 @@ static bool save_int(size_t value, int bytes, int fd)
             val4 = (value >> 24) & 0xFF;
             return (write(fd, &val1, 1) == 1) && (write(fd, &val2, 1) == 1) && (write(fd, &val3, 1) == 1) && (write(fd, &val4, 1) == 1);
         default:
-            return -1;
+            return false;
     }
 }
 
@@ -535,16 +540,15 @@ Add command to commands array
 */
 static command_data ** add_command(command_data ** array, command_data * command)
 {
-    if (!array || !command)
+    if (!command)
     {
         return NULL;
     }
 
     size_t count = commands_array_len(array);
-
     command_data ** cmds;
 
-    if ( (cmds = realloc(array, (count+2) * sizeof(command_data*) )) == NULL )
+    if ((cmds = realloc(array, (count+2) * sizeof(command_data*))) == NULL)
     {
         return NULL;
     }
@@ -592,8 +596,8 @@ static char * find_in_path(char * command, char ** envp, int mode)
 
     char * path = NULL, * cp_path = NULL, * cmd = NULL;
 
-     /* Already a path */
-    if (command[0] == '/')
+    /* Already a path */
+    if (strchr(command,'/') != NULL)
     {
         if (access(command, mode) == 0)
         {
