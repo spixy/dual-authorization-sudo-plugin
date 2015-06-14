@@ -8,34 +8,37 @@ TARGET=security_plugin.so
 # source files
 FILES=security_plugin.c
 
-OUTPUT1=/usr/local/libexec
-OUTPUT2=/usr/libexec/sudo
+OUTPUT=/usr/libexec/sudo
 
 # compiler
 CC=gcc
 
 # flags
-FLAGS=-std=gnu99 -lpam -lpam_misc -fPIC -shared
-#-D_FORTIFY_SOURCE=2
-DFLAGS=-Wall -Wextra
+FLAGS=-std=gnu11 -lpam -lpam_misc -fPIC -shared
 
 build: ${TARGET}
 
+# reinstall, root only
+reinstall: build
+	cp ${TARGET} ${OUTPUT}
+
 # install, root only
 install: build
-	cp ${TARGET} ${OUTPUT2}
+	cp ${TARGET} ${OUTPUT}
 	mkdir /var/lib/sudo_security_plugin
-	mv -f /etc/sudo.conf /etc/sudo.conf.bak
+	if test -f /etc/sudo.conf; then mv -f /etc/sudo.conf /etc/sudo.conf.bak; fi
 	echo "Plugin sudoers_policy security_plugin.so" > /etc/sudo.conf
-
+	echo "#Dual authorisation security plugin configuration file" > /etc/sudo_security_plugin.conf
 
 # uninstall, root only
 uninstall:
+	rm -f /etc/sudo.conf
+	if test -f /etc/sudo.conf.bak; then mv -f /etc/sudo.conf.bak /etc/sudo.conf; fi
+	rm -f /etc/sudo_security_plugin.conf
+	if test -f /etc/sudo_security_plugin.conf?; then rm -f /etc/sudo_security_plugin.conf?; fi
 	rm -f /usr/local/libexec/${TARGET}
-	rm -rf /var/lib/sudo_security_plugin/
-	rmdir /var/lib/sudo_security_plugin/
-	mv -f /etc/sudo.conf.bak /etc/sudo.conf
-
+	rm -rf /var/lib/sudo_security_plugin
+	rm -rf obj *.o ${TARGET}
 
 # clean
 clean:
@@ -43,4 +46,4 @@ clean:
 
 
 ${TARGET}: ${FILES}
-	${CC} ${FILES} ${FLAGS} ${DFLAGS} -o ${TARGET}
+	${CC} ${FILES} ${FLAGS} -o ${TARGET}

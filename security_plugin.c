@@ -968,6 +968,14 @@ static int execute(command_data * command, bool as_root)
                 return false;
             }
         }
+        else
+        {
+            if (setgid(0) == -1)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set gid to %d.\n", 0);
+                return false;
+            }
+        }
 
         /* Run as user */
         if (command->runas_user && !as_root)
@@ -984,6 +992,14 @@ static int execute(command_data * command, bool as_root)
             else
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "User %s not found.\n", command->runas_user);
+                return false;
+            }
+        }
+        else
+        {
+            if (setuid(0) == -1)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set uid to %d.\n", 0);
                 return false;
             }
         }
