@@ -313,6 +313,9 @@ static int load_config()
                 users[user_count++] = user_name;
                 users[user_count] = NULL;
             }
+            /*else if (str_case_starts(buffer, "enabled-commands") == 0)
+            {
+            }*/
     }
 
     fclose(fp);
@@ -1475,9 +1478,53 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
     /* Exit after SIGINT */
     signal(SIGINT, SIG_handler);
 
-    if (strcmp(argv[0],"auth") == 0 || strcmp(argv[0],"list") == 0)
+    /* Administrators command */
+    if (strcmp(argv[0], "auth") == 0)
     {
-        /* Authorise as other user */
+        bool show_only = false;
+        bool exec_only = false;
+        int verbose = false;
+
+        /* Process parameters */
+        if (argc > 1)
+        {
+            if (strcmp(argv[1],"-lv") == 0)
+            {
+                show_only = true;
+                verbose = true;
+            }
+            else if (strcmp(argv[1],"-ev") == 0)
+            {
+                exec_only = true;
+                verbose = true;
+            }
+            else
+            {
+                if (strcmp(argv[1],"-l") == 0)
+                {
+                    show_only = true;
+                    verbose = (argc > 2 && strcmp(argv[2],"-v") == 0);
+                }
+                else if (strcmp(argv[1],"-e") == 0)
+                {
+                    exec_only = true;
+                    verbose = (argc > 2 && strcmp(argv[2],"-v") == 0);
+                }
+                else
+                {
+                    verbose = true;
+                }
+
+            }
+        }
+
+        if (show_only && exec_only)
+        {
+            sudo_log(SUDO_CONV_ERROR_MSG, "Parameter -l cannot be uset together with parameter -e.\n");
+            return -1;
+        }
+
+        /* Authorise as other user? */
         if (runas_user)
         {
             if (!getpwnam(runas_user))
@@ -1525,26 +1572,46 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         msgs[0].msg_type = SUDO_CONV_PROMPT_ECHO_ON;
 
         size_t length = commands_array_len(cmds);
-        int show_only = (strcmp(argv[0],"list") == 0);
-        int mode = (argc > 1 && strcmp(argv[1],"verbose") == 0);
         size_t i = 0;
         size_t index = 1;
 
+        sudo_log(SUDO_CONV_ERROR_MSG, "Stored commands:\n");
+
         while (cmds[i])
         {
-            sudo_log(SUDO_CONV_ERROR_MSG, "%s%u/%u: ", show_only ? "" : "\n", index, length);
+            sudo_log(SUDO_CONV_ERROR_MSG, "%s%u/%u: ", (verbose && i>0) ? "\n" : "", index, length);
 
+            /* Show all commands */
             if (show_only)
             {
-                print_command(cmds[i], mode);
+
+                print_command(cmds[i], verbose);
                 i++;
                 index++;
                 continue;
             }
-            else
+            /* Execute all commands */
+            else if (exec_only)
             {
-                print_command(cmds[i], true);
+                print_command(cmds[i], verbose);
+
+                int result = auth_exec(cmds, i);
+
+                if (result < 0)
+                {
+                    free_commands_null(cmds);
+                    free(message);
+                    return -1;
+                }
+
+                index++;
+                i = result;
+
+                continue;
             }
+
+            /* Administrator decides */
+            print_command(cmds[i], verbose);
 
             if (sudo_conv(1, msgs, replies) != 0)
             {
@@ -1601,6 +1668,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
         return 0;
     }
+    /* Sudoedit command */
     else if (use_sudoedit)
     {
         syslog(LOG_INFO, "sudoedit %s", argv[1]);
@@ -1633,6 +1701,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
         return (result) ? 0 : -1;
     }
+    /* Store new command */
     else
     {
         char * com_argv = concat((char**) argv, " ");

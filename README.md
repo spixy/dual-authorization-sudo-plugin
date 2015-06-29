@@ -1,14 +1,16 @@
-To install:
+Dual-authorization plugin for sudo, allows to run commands (as root user) only after authorization by 2 different users.
+
+
+Requirements:
+Sudo 1.8 and newer
+
+
+Installation:
 run "make install" as root
 
-To uninstall:
+Uninstallation:
 run "make uninstall" as root
 
-To build only:
-run "make build"
-
-To clean temp files:
-run "make clean"
 
 ![Screenshot](examples/sudo_example.png)
 
