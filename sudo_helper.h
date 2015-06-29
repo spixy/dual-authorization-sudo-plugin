@@ -18,10 +18,12 @@
 #define PLUGIN_COMMANDS_TEMP_FILE       "/var/lib/sudo_security_plugin/commands-XXXXXX"
 #define NO_USER                         "N/A"
 #define MIN_AUTH_USERS                   2
-#define PACKAGE_VERSION                  0.1
+#define PACKAGE_VERSION                  0.2
 
 #define QUOTE(name) #name
 #define STR(macro) QUOTE(macro)
+
+typedef enum { LIST, NORMAL, FULL } print_mode;
 
 typedef struct _command_data
 {
@@ -30,10 +32,7 @@ typedef struct _command_data
     char sudoedit;
     char * runas_user;
     char * runas_group;
-    char * user;
-    char * home;
-    char * path;
-    char * pwd;
+    char ** envp;
     char ** exec_by_users;
     char ** rem_by_users;
 } command_data;
@@ -240,24 +239,6 @@ static size_t commands_array_len(command_data ** array)
 /*
 Frees 2D array
 */
-static void free_2d(char ** array, size_t count)
-{
-    if (!array)
-    {
-        return;
-    }
-
-    for (size_t i = 0; i < count; ++i)
-    {
-        free(array[i]);
-    }
-
-    free(array);
-}
-
-/*
-Frees 2D array
-*/
 static void free_2d_null(char ** array)
 {
     if (!array)
@@ -344,6 +325,34 @@ static bool save_string(char * str, int fd)
         // 0000 (4 bytes)
         return save_int(0, 4, fd);
     }
+}
+
+/*
+Save string to binary file
+*/
+static bool save_string_array(char ** str_array, int fd)
+{
+    size_t len;
+    char ** str;
+
+    /*  Array length  */
+    if ((len = str_array_len(str_array)) > UINT16_MAX)
+    {
+        return false;
+    }
+    int result = save_int(len, 2, fd);
+
+    /*  Items  */
+    str = str_array;
+
+    if (str)
+    while (*str)
+    {
+        result &= save_string(*str, fd);
+        str++;
+    }
+
+    return result;
 }
 
 /*
@@ -457,10 +466,7 @@ static command_data * make_command()
     command->sudoedit = false;
     command->runas_user = NULL;
     command->runas_group = NULL;
-    command->user = NULL;
-    command->home = NULL;
-    command->path = NULL;
-    command->pwd = NULL;
+    command->envp = NULL;
     command->exec_by_users = NULL;
     command->rem_by_users = NULL;
 
@@ -477,12 +483,9 @@ static void free_command(command_data * command)
     free(command->file);
     free(command->runas_user);
     free(command->runas_group);
-    free(command->user);
-    free(command->home);
-    free(command->path);
-    free(command->pwd);
 
     free_2d_null(command->argv);
+    free_2d_null(command->envp);
     free_2d_null(command->exec_by_users);
     free_2d_null(command->rem_by_users);
 
@@ -696,6 +699,7 @@ Getenv from envp array
 static char * getenv_from_envp(char * name, char ** envp)
 {
     char * key;
+
     if (asprintf(&key, "%s=", name) < 0)
     {
         return NULL;
@@ -707,7 +711,7 @@ static char * getenv_from_envp(char * name, char ** envp)
         {
             size_t len = strlen(key);
             free(key);
-            return *ep + len + 1;
+            return *ep + len;
         }
     }
 
