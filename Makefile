@@ -6,7 +6,7 @@
 TARGET=security_plugin.so
 
 # source files
-FILES=security_plugin.c
+FILES=security_plugin.c utils.c command.c io.c
 
 OUTPUT=/usr/libexec/sudo
 

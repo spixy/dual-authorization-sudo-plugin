@@ -7,12 +7,16 @@
 */
 
 #define _GNU_SOURCE
+#define PLUGIN_NAME                     "Sudo Dual Authorization Security Plugin"
+#define MIN_AUTH_USERS                   2
+#define PACKAGE_VERSION                  1.0
 
-#include <ctype.h>
+#include "utils.h"
+#include "command.h"
+#include "io.h"
+
 #include <errno.h>
-#include <fcntl.h>
 #include <grp.h>
-#include <memory.h>
 #include <pwd.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -21,17 +25,15 @@
 #include <string.h>
 #include <syslog.h>
 #include <sudo_plugin.h>
-#include <unistd.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 #include <security/_pam_macros.h>
 #include <sys/file.h>
-#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#include "sudo_helper.h"
+typedef enum { LIST, NORMAL, FULL } print_mode;
 
 static sudo_conv_t sudo_conv;
 static sudo_printf_t sudo_log;
@@ -51,13 +53,8 @@ static int load_config();
 static void print_command(command_data * command, print_mode mode);
 static int auth_remove(command_data ** cmds, int i);
 static int auth_exec(command_data ** cmds, int i);
-static int save(command_data ** commands);
-static int save_command(command_data * command, int fd);
 static int append_command(char * file, char ** argv, bool flag_sudoedit, char * authorised_by);
 static int sudoedit(char * file);
-static command_data ** remove_command(command_data ** array, command_data * cmd);
-static command_data * load_command(int fd);
-static command_data ** load();
 static int try_lock(char * file);
 static int check_pam();
 static int check_pam_result(int result);
@@ -96,8 +93,8 @@ static void print_command(command_data * command, print_mode mode)
 
             sudo_log(SUDO_CONV_INFO_MSG,
                 "Authorised to execute:%s Authorised to remove:%s\n",
-                (exec_by_users ? exec_by_users : NO_USER),
-                (rem_by_users ? rem_by_users : NO_USER));
+                (exec_by_users ? exec_by_users : "N/A"),
+                (rem_by_users ? rem_by_users : "N/A"));
 
             free(exec_by_users);
             free(rem_by_users);
@@ -136,8 +133,8 @@ static void print_command(command_data * command, print_mode mode)
 
         sudo_log(SUDO_CONV_INFO_MSG,
                 "Authorised to execute:%s Authorised to remove:%s\n",
-                (exec_by_users ? exec_by_users : NO_USER),
-                (rem_by_users ? rem_by_users : NO_USER));
+                (exec_by_users ? exec_by_users : "N/A"),
+                (rem_by_users ? rem_by_users : "N/A"));
 
         free(exec_by_users);
         free(rem_by_users);
@@ -513,109 +510,7 @@ static int sudo_show_version (int verbose)
     return true;
 }
 
-/*
-Save all commands to file
-*/
-static int save(command_data ** commands)
-{
-    int tmp_fd;
-    char fileName[] = PLUGIN_COMMANDS_TEMP_FILE;
 
-    if ((tmp_fd = mkstemp(fileName)) == -1)
-    {
-        return false;
-    }
-
-    /* Commands count */
-    size_t count = commands_array_len(commands);
-
-    if (count > UINT32_MAX || !save_int(count, 4, tmp_fd))
-    {
-        close(tmp_fd);
-        unlink(fileName);
-        return false;
-    }
-
-    /* Save each command */
-    command_data ** command = commands;
-    while (*command)
-    {
-        if (!save_command(*command, tmp_fd))
-        {
-            close(tmp_fd);
-            unlink(fileName);
-            return false;
-        }
-        command++;
-    }
-
-    /* Rename temp file to original file */
-    if (rename(fileName, PLUGIN_COMMANDS_FILE) == -1)
-    {
-        close(tmp_fd);
-        unlink(fileName);
-        return false;
-    }
-
-    close(tmp_fd);
-    return true;
-}
-
-/*
-Load next command from file
-*/
-static command_data * load_command(int fd)
-{
-    unsigned char sudoedit[2];
-    command_data * command;
-
-    if ( (command = make_command()) == NULL )
-    {
-        return NULL;
-    }
-
-    if (!load_string(fd, &command->file))
-    {
-        free(command);
-        return NULL;
-    }
-
-    if (!load_string_array(fd, &command->argv))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    if (!load_string_array(fd, &command->envp))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    if ((read(fd, sudoedit, 1) != 1)||
-        !load_string(fd, &command->runas_user) ||
-        !load_string(fd, &command->runas_group))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    command->sudoedit = sudoedit[0];
-
-    if (!load_string_array(fd, &command->exec_by_users))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    if (!load_string_array(fd, &command->rem_by_users))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    return command;
-}
 
 /*
 Tests if file lock does not exist and locks file
@@ -635,67 +530,6 @@ static int try_lock(char * file)
     }
 
     return true;
-}
-
-/*
-Load all commands from file
-*/
-static command_data ** load()
-{
-    command_data ** cmds;
-    unsigned char int_buffer[4];
-
-    if (commands_fd == -1)
-    {
-        return NULL;
-    }
-
-    /* Commands count */
-    if (read(commands_fd, int_buffer, 4) != 4)
-    {
-        return NULL;
-    }
-
-    size_t count = convert_from_bytes(int_buffer, 4);
-
-    if (count > (SIZE_MAX / sizeof(command_data*) - 1) || (cmds = malloc((count+1) * sizeof(command_data*))) == NULL)
-    {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-        return NULL;
-    }
-
-    /* Load each command */
-    for (size_t i = 0; i < count; i++)
-    {
-        if ((cmds[i] = load_command(commands_fd)) == NULL)
-        {
-            cmds[i] = NULL;
-            free_commands_null(cmds);
-
-            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-            return NULL;
-        }
-    }
-
-    cmds[count] = NULL;
-
-    return cmds;
-}
-
-/*
-Save command to binary file
-*/
-static int save_command(command_data * command, int fd)
-{
-    int result = save_string(command->file, fd) &&
-                 save_string_array(command->argv, fd) &&
-                 save_string_array(command->envp, fd) &&
-                 save_int(command->sudoedit, 1, fd) &&
-                 save_string(command->runas_user, fd) &&
-                 save_string(command->runas_group, fd) &&
-                 save_string_array(command->exec_by_users, fd) &&
-                 save_string_array(command->rem_by_users, fd);
-    return result;
 }
 
 /*
@@ -1497,7 +1331,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             return -1;
         }
 
-        command_data ** cmds = load();
+        command_data ** cmds = load(commands_fd);
 
         /* No commands found */
         if (!cmds || !cmds[0])
@@ -1724,7 +1558,7 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
     }
 
     /* Load commands from file */
-    command_data ** cmds = load();
+    command_data ** cmds = load(commands_fd);
     command_data ** cmds_save;
 
     if ((cmds_save = add_command(cmds, command)) == NULL)
@@ -1748,38 +1582,6 @@ static int append_command(char * file, char ** argv, bool flag_sudoedit, char * 
     }
 
     return result;
-}
-
-/*
-Remove command from commands array
-*/
-static command_data ** remove_command(command_data ** array, command_data * cmd)
-{
-    if (!array || !cmd)
-    {
-        return NULL;
-    }
-
-    size_t i = 0;
-    size_t index = 0;
-
-    while (array[i])
-    {
-        if (array[i] != cmd)
-        {
-            array[index] = array[i];
-            index++;
-        }
-        else
-        {
-            free_command(cmd);
-        }
-        i++;
-    }
-
-    array[index] = NULL;
-
-    return array;
 }
 
 /*
