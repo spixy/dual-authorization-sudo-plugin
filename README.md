@@ -30,4 +30,4 @@ run **make uninstall** as root
 
 
 ##Screenshot:
-![Screenshot](examples/sudo_example.png)
+![Screenshot](https://cloud.githubusercontent.com/assets/4542110/8735206/625d436c-2c0f-11e5-89a4-614dfce98598.png)

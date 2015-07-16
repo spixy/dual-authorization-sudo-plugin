@@ -22,11 +22,9 @@
 #include <syslog.h>
 #include <sudo_plugin.h>
 #include <unistd.h>
-
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 #include <security/_pam_macros.h>
-
 #include <sys/file.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>

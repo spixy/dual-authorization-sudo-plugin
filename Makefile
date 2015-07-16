@@ -29,6 +29,7 @@ install: build
 	if test -f /etc/sudo.conf; then mv -f /etc/sudo.conf /etc/sudo.conf.bak; fi
 	echo "Plugin sudoers_policy security_plugin.so" > /etc/sudo.conf
 	echo "#Dual authorisation security plugin configuration file" > /etc/sudo_security_plugin.conf
+	gzip -c manpage > /usr/share/man/man8/dual-authorization.8.gz
 
 # uninstall, root only
 uninstall:
@@ -37,6 +38,7 @@ uninstall:
 	rm -f /etc/sudo_security_plugin.conf
 	if test -f /etc/sudo_security_plugin.conf?; then rm -f /etc/sudo_security_plugin.conf?; fi
 	rm -f /usr/local/libexec/${TARGET}
+	rm -f /usr/share/man/man8/dual-authorization.8.gz
 	rm -rf /var/lib/sudo_security_plugin
 	rm -rf obj *.o ${TARGET}
 
