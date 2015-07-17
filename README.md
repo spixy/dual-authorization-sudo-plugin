@@ -1,24 +1,31 @@
-Dual-authorization plugin for sudo, allows to run commands (as root user) only after authorization by 2 different users.
+Dual-authorization plugin for Sudo, allows to run commands (as root user) only after authorization by 2 different users.
 
 
 ##Usage:
 
+**sudo** PROGRAM [ PARAMETERS ]
+
 **sudo auth [ -s | -e | -r ] [ -l | -f ]**
 
-  **-s**    prints all commands
+###Options:
+
+If command (parameters are optional) is supplied, command is stored in queue.
+
+If **auth** parameter is used, plugin allows to run selected commands or remove them from queue.
+
+######OPTIONAL PARAMETERS:
+
+  **-s**    prints all commands inc queue
   
-  **-e**    executes all commands
+  **-e**    executes all commands in queue
   
-  **-r**    removes all commands
+  **-r**    removes all commands from queue
   
-  **-l**    shows commands in list
+  **-l**    shows commands in brief list
   
   **-f**    shows full commands information
 
 [Configuration file example](examples/sudo_security_plugin.conf)
-
-##Requirements:
-Sudo 1.8 and newer
 
 
 ##Setup:
@@ -27,6 +34,9 @@ run **make install** as root
 
 Uninstallation:
 run **make uninstall** as root
+
+###Requirements:
+Sudo 1.8 and newer
 
 
 ##Screenshot:

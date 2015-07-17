@@ -42,6 +42,7 @@ static char * runas_group = NULL;
 static char ** users = NULL;
 static char * user = NULL;
 static char ** envp = NULL;
+static unsigned int min_auth_users = MIN_AUTH_USERS;
 static bool use_sudoedit = false;  // sudoedit mode
 static bool always_auth = false;   // always authorise before new command is added
 static int commands_fd = -1;
@@ -159,20 +160,18 @@ static int load_config()
 {
     FILE * fp;
     int error = 0;
-    int user_count = 0;
-    int user_size = MIN_AUTH_USERS + 1;
+    unsigned int user_count = 0;
+    size_t user_size = MIN_AUTH_USERS + 1;
     ssize_t len = 0;
     size_t buflen = 0;
     struct passwd *pw;
     char* buffer = NULL;
 
-    if ((users = malloc(user_size * sizeof(char*))) == NULL)
+    if ((users = calloc(user_size, sizeof(char*))) == NULL)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         return false;
     }
-
-    users[0] = NULL;
 
     if ( (fp = fopen(PLUGIN_CONF_FILE, "r")) == NULL )
     {
@@ -184,192 +183,190 @@ static int load_config()
     // read new line
     while ( (len = getline(&buffer, &buflen, fp)) != -1 )
     {
-            // ignore empty lines and comments
-            if (len == 0 || buffer[0] == '#' || buffer[0] == '\n')
+        // ignore empty lines and comments
+        if (len == 0 || buffer[0] == '#' || buffer[0] == '\n')
+        {
+            continue;
+        }
+
+        // set null instead of new line character
+        buffer[len - 1] = '\0';
+
+        if (str_case_starts(buffer, "always_auth ") && (size_t)len > strlen("always_auth ")) // parsing "user xxx"
+        {
+            char * value = rem_whitespace(buffer + strlen("always_auth "));
+
+            if (strcasecmp(value,"true") == 0 || strcmp(value,"1") == 0)
             {
+                always_auth = true;
+            }
+            else if (strcasecmp(value,"false") == 0 || strcmp(value,"0") == 0)
+            {
+                always_auth = false;
+            }
+        }
+        if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user ")) // parsing "user xxx"
+        {
+            char * user_name = strdup(rem_whitespace(buffer + strlen("user ")));
+
+            if (!user_name)
+            {
+                error = -1;
+                break;
+            }
+
+            // check if user exists
+            if (!getpwnam(user_name))
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "User %s not found.\n", user_name);
+                free(user_name);
                 continue;
             }
 
-            // set null instead of new line character
-            buffer[len - 1] = '\0';
-
-            if (str_case_starts(buffer, "always_auth ") && (size_t)len > strlen("always_auth ")) // parsing "user xxx"
+            // check if user is already loaded
+            if (array_null_contains(users, user_name))
             {
-                char * value = rem_whitespace(buffer + strlen("always_auth "));
-
-                if (strcasecmp(value,"true") == 0 || strcmp(value,"1") == 0)
-                {
-                    always_auth = true;
-                }
-                else if (strcasecmp(value,"false") == 0 || strcmp(value,"0") == 0)
-                {
-                    always_auth = false;
-                }
+                sudo_log(SUDO_CONV_ERROR_MSG, "Found duplicate of user %s, skipping.\n", user_name);
+                free(user_name);
+                continue;
             }
-            if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user ")) // parsing "user xxx"
-            {
-                char * user_name = strdup(rem_whitespace(buffer + strlen("user ")));
 
-                if (!user_name)
+            // resize array
+            if (user_count+1 == user_size)
+            {
+                user_size += 2;
+                char ** new_users;
+                if ((new_users = realloc(users, user_size * sizeof(char*))) == NULL)
                 {
                     error = -1;
                     break;
                 }
-
-                // checks if user exists
-                if (!getpwnam(user_name))
-                {
-                    sudo_log(SUDO_CONV_ERROR_MSG, "User %s not found.\n", user_name);
-                    free(user_name);
-                    continue;
-                }
-
-                // checks if user is already loaded
-                if (array_null_contains(users, user_name))
-                {
-                    sudo_log(SUDO_CONV_ERROR_MSG, "Found duplicate of user %s, skipping.\n", user_name);
-                    free(user_name);
-                    continue;
-                }
-
-                // resize array
-                if (user_count+1 == user_size)
-                {
-                    user_size += 2;
-                    char ** new_users;
-                    if ((new_users = realloc(users, user_size * sizeof(char*))) == NULL)
-                    {
-                        error = -1;
-                        break;
-                    }
-                    users = new_users;
-                }
-
-                // save user name
-                users[user_count++] = user_name;
-                users[user_count] = NULL;
+                users = new_users;
             }
-            else if (str_case_starts(buffer, "uid ") && (size_t)len > strlen("uid ")) // parsing "uid 123"
+
+            // save user name
+            users[user_count++] = user_name;
+            users[user_count] = NULL;
+        }
+        else if (str_case_starts(buffer, "uid ") && (size_t)len > strlen("uid ")) // parsing "uid 123"
+        {
+            char * user_id = strdup(rem_whitespace(buffer + strlen("uid ")));
+
+            if (!user_id)
             {
-                char * user_id = strdup(rem_whitespace(buffer + strlen("uid ")));
+                error = -1;
+                break;
+            }
 
-                if (!user_id)
-                {
-                    error = -1;
-                    break;
-                }
+            // get user struct
+            char *p;
+            errno = 0;
+            uid_t id = strtol(user_id, &p, 10);
 
-                // get user struct
-                char *p;
-                errno = 0;
-                uid_t id = strtol(user_id, &p, 10);
-
-                if (errno != 0 || *p != 0 || p == user_id)
-                {
-                    sudo_log(SUDO_CONV_ERROR_MSG, "Invalid UID %s\n", user_id);
-                    free(user_id);
-                    error = -2;
-                    continue;
-                }
-
-                pw = getpwuid(id);
-
-                if (!pw)
-                {
-                    sudo_log(SUDO_CONV_ERROR_MSG, "User with uid %s not found.\n", user_id);
-                    free(user_id);
-                    error = -2;
-                    continue;
-                }
-
+            if (errno != 0 || *p != 0 || p == user_id)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "Invalid UID %s\n", user_id);
                 free(user_id);
+                error = -2;
+                continue;
+            }
 
-                // checks if user is already loaded
-                if (array_null_contains(users, pw->pw_name))
-                {
-                    sudo_log(SUDO_CONV_ERROR_MSG, "Found duplicate of user %s, skipping.\n", pw->pw_name);
-                    continue;
-                }
+            pw = getpwuid(id);
 
-                // resize array
-                if (user_count+1 == user_size)
-                {
-                    user_size += 2;
-                    char ** new_users;
-                    if ((new_users = realloc(users, user_size * sizeof(char*))) == NULL)
-                    {
-                        error = -1;
-                        break;
-                    }
-                    users = new_users;
-                }
+            if (!pw)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "User with uid %s not found.\n", user_id);
+                free(user_id);
+                error = -2;
+                continue;
+            }
 
-                char * user_name = strdup(pw->pw_name);
+            free(user_id);
 
-                if (!user_name)
+            // checks if user is already loaded
+            if (array_null_contains(users, pw->pw_name))
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "Found duplicate of user %s, skipping.\n", pw->pw_name);
+                continue;
+            }
+
+            // resize array
+            if (user_count+1 == user_size)
+            {
+                user_size += 2;
+                char ** new_users;
+                if ((new_users = realloc(users, user_size * sizeof(char*))) == NULL)
                 {
                     error = -1;
                     break;
                 }
-
-                // save user name
-                users[user_count++] = user_name;
-                users[user_count] = NULL;
+                users = new_users;
             }
-            /*else if (str_case_starts(buffer, "enabled-commands") == 0)
+
+            char * user_name = strdup(pw->pw_name);
+
+            if (!user_name)
             {
-            }*/
+                error = -1;
+                break;
+            }
+
+            // save user name
+            users[user_count++] = user_name;
+            users[user_count] = NULL;
+        }
+        else if (str_case_starts(buffer, "c "))
+        {
+            char * min_users_str = strdup(rem_whitespace(buffer + strlen("authorizations_count ")));
+
+            if (!min_users_str)
+            {
+                error = -1;
+                break;
+            }
+
+            // convert to number
+            char *p;
+            errno = 0;
+            size_t _min_auth_users = strtol(min_users_str, &p, 10);
+
+            if (errno != 0 || *p != 0 || p == min_users_str || _min_auth_users < 1 || _min_auth_users > SIZE_MAX)
+            {
+                sudo_log(SUDO_CONV_ERROR_MSG, "Invalid authorization count: %s\n", min_users_str);
+                free(min_users_str);
+                error = -2;
+                continue;
+            }
+
+            // save
+            min_auth_users = _min_auth_users;
+        }
     }
 
     fclose(fp);
     free(buffer);
 
-    if (error == -1)
+    switch (error)
     {
-        free_2d_null(users);
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-        return false;
+        case -1: // allocation error
+            free_2d_null(users);
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
+            return false;
+
+        case -2: // invalid configuration error
+            free_2d_null(users);
+            return false;
     }
-    if (error == -2)
+
+    if (user_count < min_auth_users)
     {
         free_2d_null(users);
-        return false;
-    }
-    if (user_count < MIN_AUTH_USERS)
-    {
-        free_2d_null(users);
-        sudo_log(SUDO_CONV_ERROR_MSG, "Not enough users set in %s (minimum is %d).\n", STR(PLUGIN_CONF_FILE), MIN_AUTH_USERS);
+        sudo_log(SUDO_CONV_ERROR_MSG, "Not enough users set in %s (minimum is %d).\n", STR(PLUGIN_CONF_FILE), min_auth_users);
         return false;
     }
 
     return true;
 }
-
-/*
-Builds envp array for exec
-*/
-/*static char ** build_envp(command_data * command)
-{
-    static char ** local_envp;
-    int i = 0;
-
-    if ((local_envp = malloc(5 * sizeof(char *))) == NULL)
-    {
-        return NULL;
-    }
-
-    if (asprintf(&local_envp[i++], "USER=%s", command->user) == -1 ||
-        asprintf(&local_envp[i++], "HOME=%s", command->home) == -1 ||
-        asprintf(&local_envp[i++], "PATH=%s", command->path) == -1 ||
-        asprintf(&local_envp[i++], "PWD=%s",  command->pwd ) == -1)
-    {
-        free_2d(local_envp, i-1);
-        return NULL;
-    }
-    local_envp[i] = NULL;
-
-    return local_envp;
-}*/
 
 /*-
 Returns 1 on success, 0 on failure, -1 if a general error occurred, or -2 if there was a usage error.
@@ -459,7 +456,6 @@ static int sudo_open(unsigned int version, sudo_conv_t conversation, sudo_printf
     return 1;
 }
 
-
 /*
 Sudo_close() is called when the command being run by sudo finishes.
 */
@@ -509,8 +505,6 @@ static int sudo_show_version (int verbose)
 
     return true;
 }
-
-
 
 /*
 Tests if file lock does not exist and locks file
@@ -1089,6 +1083,7 @@ Returns next index in command list
 */
 static int auth_exec(command_data ** cmds, int i)
 {
+    // not authorized by me yet
     if (!array_null_contains(cmds[i]->exec_by_users, user))
     {
         char * exec_by_user = strdup(user);
@@ -1101,6 +1096,7 @@ static int auth_exec(command_data ** cmds, int i)
         // set me as authorized user
         cmds[i]->exec_by_users = add_string(cmds[i]->exec_by_users, exec_by_user);
 
+        // syslog
         char * com_argv = concat((char**) cmds[i]->argv, " ");
         if (com_argv)
         {
@@ -1114,23 +1110,21 @@ static int auth_exec(command_data ** cmds, int i)
             return -1;
         }
 
-        if (str_array_len(cmds[i]->exec_by_users) < MIN_AUTH_USERS)
+        if (str_array_len(cmds[i]->exec_by_users) < min_auth_users)
         {
             return ++i;
         }
     }
-    else
+    // already authorized by me and cannot run command
+    else if (str_array_len(cmds[i]->exec_by_users) < min_auth_users)
     {
-        // already authorized by me
-        if (str_array_len(cmds[i]->exec_by_users) < MIN_AUTH_USERS)
-        {
-            sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorised, skipping.\n");
-            return ++i;
-        }
+        sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorised, skipping.\n");
+        return ++i;
     }
 
     bool runas_root = (cmds[i]->sudoedit);
 
+    // syslog
     char * com_argv = concat((char**) cmds[i]->argv, " ");
     char * exec_by_users = concat((char**) cmds[i]->exec_by_users, " ");
     if (com_argv && exec_by_users)
@@ -1140,6 +1134,7 @@ static int auth_exec(command_data ** cmds, int i)
     free(com_argv);
     free(exec_by_users);
 
+    // execution succesfull?
     if (execute(cmds[i], runas_root))
     {
         cmds = remove_command(cmds, cmds[i]);
@@ -1155,6 +1150,7 @@ static int auth_exec(command_data ** cmds, int i)
     }
     else
     {
+        // skip
         sudo_log(SUDO_CONV_ERROR_MSG, "Error in command execution, skipping.\n");
         return ++i;
     }
@@ -1166,6 +1162,7 @@ Returns next index in command list
 */
 static int auth_remove(command_data ** cmds, int i)
 {
+    // not authorized by me yet
     if (!array_null_contains(cmds[i]->rem_by_users, user))
     {
         char * rem_by_user = strdup(user);
@@ -1192,24 +1189,24 @@ static int auth_remove(command_data ** cmds, int i)
             return -1;
         }
     }
-    else if (str_array_len(cmds[i]->rem_by_users) < MIN_AUTH_USERS)
+    // already authorized by me and cannot run command
+    else if (str_array_len(cmds[i]->rem_by_users) < min_auth_users)
     {
-        // already authorized by me
         sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorized, skipping.\n");
         return ++i;
     }
 
     char * stored_user = getenv_from_envp("USER", cmds[i]->envp);
 
-    if ((strcmp(stored_user, user) == 0) ||                    // I wrote command (and I am admin)   OR
-        str_array_len(cmds[i]->rem_by_users) == MIN_AUTH_USERS)  // two admins already authorised
+    if ((strcmp(stored_user, user) == 0) ||                      // I wrote command (and I am admin)   OR
+        str_array_len(cmds[i]->rem_by_users) == min_auth_users)  // all admins already authorised
     {
-
         if (cmds[i]->sudoedit && remove(cmds[i]->argv[3]) == -1)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot remove %s\n", cmds[i]->argv[3]);
         }
 
+        // syslog
         char * com_argv = concat((char**) cmds[i]->argv, " ");
         char * rem_by_users = concat((char**) cmds[i]->rem_by_users, " ");
         if (com_argv && rem_by_users)
@@ -1233,7 +1230,7 @@ static int auth_remove(command_data ** cmds, int i)
     }
     else
     {
-        return ++i;
+        return ++i; // skip
     }
 }
 
@@ -1242,6 +1239,8 @@ Handle signals
 */
 static void SIG_handler(int signal)
 {
+    free_2d_null(users);
+
     if (commands_fd != -1)
     {
         flock(commands_fd, LOCK_UN);

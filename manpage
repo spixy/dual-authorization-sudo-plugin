@@ -1,17 +1,30 @@
 .\" Manpage for dual-authorization sudo plugin.
 .\" Contact spixy16@gmail.com to correct errors or typos.
-.TH dual-authorization 8 "16 July 2015" "1.0" "dual-authorization plugin man page"
+.TH dual-authorization 8 "17 July 2015" "1.0" "dual-authorization plugin man page"
 .SH NAME
 Dual-authorization Sudo plugin
 .SH SYNOPSIS
-sudo PROGRAM [PARAMETERS]
-sudo auth [-s|-e|-r]
+\fBsudo\fR \fIPROGRAM\fR [\fIPARAMETERS\fR]
+.br
+\fBsudo auth [-s|-e|-r] [-l|-f]\fR
 .SH DESCRIPTION
 Dual-authorization plugin for Sudo, allows to run commands (as root user) after authorization by 2 different users.
 .SH OPTIONS
-If command (parameters are optional) is supplied, command is stored to queue.
-
+If command (parameters are optional) is supplied, command is stored in queue.
+.br
 If auth parameter is used, plugin allows to run selected commands or remove them from queue.
+
+\fBOPTIONAL PARAMETERS:\fR
+.br
+\fB-s\fR   print all commands in queue
+.br
+\fB-e\fR   execute all commands in queue
+.br
+\fB-r\fR   remove all commands from queue
+.br
+\fB-l\fR   show commands in brief list
+.br
+\fB-s\fR   show full commands information
 .SH SEE ALSO
 sudo(8), sudo_plugin(5)
 .SH BUGS

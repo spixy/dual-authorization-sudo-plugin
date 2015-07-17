@@ -1,9 +1,9 @@
 #ifndef IO_H_INCLUDED
 #define IO_H_INCLUDED
 
-#define PLUGIN_CONF_FILE                "/etc/sudo_security_plugin.conf"
-#define PLUGIN_COMMANDS_FILE            "/var/lib/sudo_security_plugin/commands"
-#define PLUGIN_COMMANDS_TEMP_FILE       "/var/lib/sudo_security_plugin/commands-XXXXXX"
+#define PLUGIN_CONF_FILE                "/etc/sudo_dual_authorization.conf"
+#define PLUGIN_COMMANDS_FILE            "/var/lib/sudo_dual_authorization/commands"
+#define PLUGIN_COMMANDS_TEMP_FILE       "/var/lib/sudo_dual_authorization/commands-XXXXXX"
 
 #include "command.h"
 

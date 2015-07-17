@@ -188,7 +188,7 @@ bool load_string_array(int fd, char *** str_array)
         return true;
     }
 
-    if ( (array = malloc((len+1)*sizeof(char*))) == NULL )
+    if ( (array = calloc(len+1, sizeof(char*))) == NULL )
     {
         return false;
     }
@@ -199,15 +199,12 @@ bool load_string_array(int fd, char *** str_array)
 
         if (!load_string(fd, &str))
         {
-            array[i] = NULL;
             free_2d_null(array);
             return false;
         }
 
         array[i] = str;
     }
-
-    array[len] = NULL;
 
     *str_array = array;
 
@@ -232,7 +229,7 @@ command_data ** load(int fd)
 
     size_t count = convert_from_bytes(int_buffer, 4);
 
-    if (count > (SIZE_MAX / sizeof(command_data*) - 1) || (cmds = malloc((count+1) * sizeof(command_data*))) == NULL)
+    if (count > (SIZE_MAX / sizeof(command_data*) - 1) || (cmds = calloc((count+1), sizeof(command_data*))) == NULL)
     {
         //sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
         return NULL;
@@ -243,15 +240,12 @@ command_data ** load(int fd)
     {
         if ((cmds[i] = load_command(fd)) == NULL)
         {
-            cmds[i] = NULL;
             free_commands_null(cmds);
 
             //sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
             return NULL;
         }
     }
-
-    cmds[count] = NULL;
 
     return cmds;
 }
