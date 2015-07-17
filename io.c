@@ -138,14 +138,14 @@ bool load_string(int fd, char ** str)
 
     size_t len = convert_from_bytes(int_buffer, 4);
 
-    // Empty string
+    /* Empty string */
     if (len == 0)
     {
         *str = NULL;
         return true;
     }
 
-    // Load string <length:4bytes><string>
+    /* Load string <length:4bytes><string> */
     if ((string = malloc(sizeof(char) * len)) == NULL)
     {
         return false;
@@ -193,6 +193,7 @@ bool load_string_array(int fd, char *** str_array)
         return false;
     }
 
+    /* Load strings */
     for (size_t i = 0; i < len; i++)
     {
         char * str = NULL;
@@ -252,58 +253,34 @@ command_data ** load(int fd)
 
 command_data * load_command(int fd)
 {
-    unsigned char sudoedit[2];
+    unsigned char sudoedit[1];
     command_data * command;
 
-    if ( (command = make_command()) == NULL )
+    if ((command = make_command()) == NULL)
     {
         return NULL;
     }
 
-    if (!load_string(fd, &command->file))
-    {
-        free(command);
-        return NULL;
-    }
+    bool result = load_string(fd, &command->file) &&
+                  load_string_array(fd, &command->argv) &&
+                  load_string_array(fd, &command->envp) &&
+                  (read(fd, sudoedit, 1) == 1) &&
+                  load_string(fd, &command->runas_user) &&
+                  load_string(fd, &command->runas_group) &&
+                  load_string_array(fd, &command->exec_by_users) &&
+                  load_string_array(fd, &command->rem_by_users);
 
-    if (!load_string_array(fd, &command->argv))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    if (!load_string_array(fd, &command->envp))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    if ((read(fd, sudoedit, 1) != 1)||
-        !load_string(fd, &command->runas_user) ||
-        !load_string(fd, &command->runas_group))
+    if (!result)
     {
         free_command(command);
         return NULL;
     }
 
     command->sudoedit = sudoedit[0];
-
-    if (!load_string_array(fd, &command->exec_by_users))
-    {
-        free_command(command);
-        return NULL;
-    }
-
-    if (!load_string_array(fd, &command->rem_by_users))
-    {
-        free_command(command);
-        return NULL;
-    }
-
     return command;
 }
 
-int save(command_data ** commands)
+bool save(command_data ** commands)
 {
     int tmp_fd;
     char fileName[] = PLUGIN_COMMANDS_TEMP_FILE;
@@ -348,15 +325,15 @@ int save(command_data ** commands)
     return true;
 }
 
-int save_command(command_data * command, int fd)
+bool save_command(command_data * command, int fd)
 {
-    int result = save_string(command->file, fd) &&
-                 save_string_array(command->argv, fd) &&
-                 save_string_array(command->envp, fd) &&
-                 save_int(command->sudoedit, 1, fd) &&
-                 save_string(command->runas_user, fd) &&
-                 save_string(command->runas_group, fd) &&
-                 save_string_array(command->exec_by_users, fd) &&
-                 save_string_array(command->rem_by_users, fd);
+    bool result = save_string(command->file, fd) &&
+                  save_string_array(command->argv, fd) &&
+                  save_string_array(command->envp, fd) &&
+                  save_int(command->sudoedit, 1, fd) &&
+                  save_string(command->runas_user, fd) &&
+                  save_string(command->runas_group, fd) &&
+                  save_string_array(command->exec_by_users, fd) &&
+                  save_string_array(command->rem_by_users, fd);
     return result;
 }

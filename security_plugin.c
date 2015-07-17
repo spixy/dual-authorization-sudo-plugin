@@ -33,7 +33,12 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-typedef enum { LIST, NORMAL, FULL } print_mode;
+typedef enum
+{
+    LIST,
+    NORMAL,
+    FULL
+} print_mode;
 
 static sudo_conv_t sudo_conv;
 static sudo_printf_t sudo_log;
@@ -205,7 +210,7 @@ static int load_config()
                 always_auth = false;
             }
         }
-        if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user ")) // parsing "user xxx"
+        else if (str_case_starts(buffer, "user ") && (size_t)len > strlen("user ")) // parsing "user xxx"
         {
             char * user_name = strdup(rem_whitespace(buffer + strlen("user ")));
 
@@ -271,17 +276,17 @@ static int load_config()
                 continue;
             }
 
+            free(user_id);
+
             pw = getpwuid(id);
 
+            // check if user with UID exists
             if (!pw)
             {
-                sudo_log(SUDO_CONV_ERROR_MSG, "User with uid %s not found.\n", user_id);
-                free(user_id);
+                sudo_log(SUDO_CONV_ERROR_MSG, "User with uid %s not found.\n", id);
                 error = -2;
                 continue;
             }
-
-            free(user_id);
 
             // checks if user is already loaded
             if (array_null_contains(users, pw->pw_name))
@@ -315,7 +320,7 @@ static int load_config()
             users[user_count++] = user_name;
             users[user_count] = NULL;
         }
-        else if (str_case_starts(buffer, "c "))
+        else if (str_case_starts(buffer, "authorizations_count "))
         {
             char * min_users_str = strdup(rem_whitespace(buffer + strlen("authorizations_count ")));
 
@@ -463,6 +468,7 @@ static void sudo_close (int exit_status, int error)
 {
     free_2d_null(users);
 
+    /* Unlock file with commands */
     if (commands_fd != -1)
     {
         flock(commands_fd, LOCK_UN);
@@ -471,7 +477,6 @@ static void sudo_close (int exit_status, int error)
 
     closelog();
 
-    /* The policy might log the command exit status here. */
     if (error)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Command error: %s.\n", strerror(error));
@@ -626,6 +631,7 @@ static int PAM_conv(int num_msg, const struct pam_message **msg, struct pam_resp
                     msgs[0].msg_type = SUDO_CONV_PROMPT_ECHO_OFF;
                 }
 
+                /* Message */
                 char * message = strdup(msg[i]->msg);
                 if (!message)
                 {
@@ -640,6 +646,7 @@ static int PAM_conv(int num_msg, const struct pam_message **msg, struct pam_resp
                     return PAM_CONV_ERR;
                 }
 
+                /* Response */
                 reply[i].resp_retcode = 0;
                 reply[i].resp = strdup(replies[0].reply);
                 if (!reply[i].resp)
@@ -756,6 +763,7 @@ static int execute(command_data * command, bool as_root)
         }
         else
         {
+            /* Run as root */
             if (setgid(0) == -1)
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set gid to %d.\n", 0);
@@ -783,6 +791,7 @@ static int execute(command_data * command, bool as_root)
         }
         else
         {
+            /* Run as root */
             if (setuid(0) == -1)
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set uid to %d.\n", 0);
@@ -820,6 +829,7 @@ static int run_editor(char * arg)
         return false;
     }
 
+    /* Find editor in ENVP */
     char * editor = find_editor(envp);
 
     if (!editor)
@@ -837,7 +847,7 @@ static int run_editor(char * arg)
         return false;
     }
 
-    /* Run text editor */
+    /* Create command */
     command_data * cmd = make_command();
     if (!cmd)
     {
@@ -872,10 +882,12 @@ static int run_editor(char * arg)
         return false;
     }
 
+    /* Run text editor */
     int result = execute(cmd, false);
 
     cmd->envp = NULL;
     free_command(cmd);
+
     return result;
 }
 
@@ -897,7 +909,7 @@ static int run_diff(command_data * commmand)
         return false;
     }
 
-    /* Run diff */
+    /* Crete command */
     command_data * cmd = make_command();
     if (!cmd)
     {
@@ -931,10 +943,12 @@ static int run_diff(command_data * commmand)
 
     sudo_log(SUDO_CONV_ERROR_MSG, "DIFF %s\n", file1);
 
+    /* Run diff */
     int result = execute(cmd, true);
 
     cmd->envp = NULL;
     free_command(cmd);
+
     return result;
 }
 
@@ -950,7 +964,6 @@ static int sudoedit(char * orig_file)
 
     char * orig_file_basename = basename(orig_file);
     char * temp_file;
-    int result;
 
     if (!orig_file_basename || asprintf(&temp_file, "/var/tmp/%s-XXXXXX", orig_file_basename) < 0)
     {
@@ -958,6 +971,7 @@ static int sudoedit(char * orig_file)
         return false;
     }
 
+    /* Generate temporary file */
     int fd = mkstemp(temp_file);
     if (fd < 0)
     {
@@ -966,26 +980,28 @@ static int sudoedit(char * orig_file)
         return false;
     }
 
-    result = copy_file(orig_file, fd);
+    /* Copy file */
+    int result = copy_file(orig_file, fd);
     close(fd);
 
-    if (result == -1)
+    switch (result)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "File does not exist\n");
-        free(temp_file);
-        return false;
-    }
-    if (result == 0)
-    {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
-        unlink(temp_file);
-        free(temp_file);
-        return false;
+        case -1:
+            sudo_log(SUDO_CONV_ERROR_MSG, "File does not exist\n");
+            free(temp_file);
+            return false;
+
+        case 0:
+            sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
+            unlink(temp_file);
+            free(temp_file);
+            return false;
     }
 
+    /* Change file attributes */
     if (chown(temp_file, getpwnam(user)->pw_uid, getpwnam(user)->pw_gid) == -1 || chmod(temp_file, S_IRUSR | S_IWUSR) == -1)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change attributes of file\n");
+        sudo_log(SUDO_CONV_ERROR_MSG, "Cannot change file attributes\n");
         unlink(temp_file);
         free(temp_file);
         return false;
@@ -1008,6 +1024,7 @@ static int sudoedit(char * orig_file)
     }
     else
     {
+        /* Save old temp file */
         char * old_temp_file = temp_file;
 
         if (asprintf(&temp_file, "/var/tmp/%s-XXXXXX", orig_file_basename) < 0)
@@ -1017,6 +1034,7 @@ static int sudoedit(char * orig_file)
             return false;
         }
 
+        /* Generate new temp file */
         fd = mkstemp(temp_file);
         if (fd < 0)
         {
@@ -1026,6 +1044,7 @@ static int sudoedit(char * orig_file)
             return false;
         }
 
+        /* Copy old temp file to new one */
         if (!copy_file(old_temp_file, fd))
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot copy file\n");
@@ -1035,7 +1054,9 @@ static int sudoedit(char * orig_file)
             free(temp_file);
             return false;
         }
+
         close(fd);
+        unlink(old_temp_file);
         free(old_temp_file);
 
         /* Save command: "mv -f -T /var/tmp/file-xxxxxx file" */
@@ -1083,7 +1104,7 @@ Returns next index in command list
 */
 static int auth_exec(command_data ** cmds, int i)
 {
-    // not authorized by me yet
+    // not authorised by me yet
     if (!array_null_contains(cmds[i]->exec_by_users, user))
     {
         char * exec_by_user = strdup(user);
@@ -1093,7 +1114,7 @@ static int auth_exec(command_data ** cmds, int i)
             return false;
         }
 
-        // set me as authorized user
+        // set me as authorised user
         cmds[i]->exec_by_users = add_string(cmds[i]->exec_by_users, exec_by_user);
 
         // syslog
@@ -1115,7 +1136,7 @@ static int auth_exec(command_data ** cmds, int i)
             return ++i;
         }
     }
-    // already authorized by me and cannot run command
+    // already authorised by me and cannot run command
     else if (str_array_len(cmds[i]->exec_by_users) < min_auth_users)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorised, skipping.\n");
@@ -1162,7 +1183,7 @@ Returns next index in command list
 */
 static int auth_remove(command_data ** cmds, int i)
 {
-    // not authorized by me yet
+    // not authorised by me yet
     if (!array_null_contains(cmds[i]->rem_by_users, user))
     {
         char * rem_by_user = strdup(user);
@@ -1172,7 +1193,7 @@ static int auth_remove(command_data ** cmds, int i)
             return false;
         }
 
-        // set me as authorized user
+        // set me as authorised user
         cmds[i]->rem_by_users = add_string(cmds[i]->rem_by_users, rem_by_user);
 
         char * com_argv = concat((char**) cmds[i]->argv, " ");
@@ -1189,10 +1210,10 @@ static int auth_remove(command_data ** cmds, int i)
             return -1;
         }
     }
-    // already authorized by me and cannot run command
+    // already authorised by me and cannot run command
     else if (str_array_len(cmds[i]->rem_by_users) < min_auth_users)
     {
-        sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorized, skipping.\n");
+        sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorised, skipping.\n");
         return ++i;
     }
 
@@ -1230,7 +1251,8 @@ static int auth_remove(command_data ** cmds, int i)
     }
     else
     {
-        return ++i; // skip
+        // skip
+        return ++i;
     }
 }
 
@@ -1241,6 +1263,7 @@ static void SIG_handler(int signal)
 {
     free_2d_null(users);
 
+    /* Unlock file with commands */
     if (commands_fd != -1)
     {
         flock(commands_fd, LOCK_UN);
@@ -1303,7 +1326,6 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
                     return -1;
                 }
             }
-
         }
 
         /* Authorise as other user? */
@@ -1594,9 +1616,10 @@ static int sudo_list(int argc, char * const argv[], int verbose, const char * li
     }
 
     const char * check_user = list_user ? list_user : user;
-    bool allowed;
 
-    if ((allowed = array_null_contains(users, check_user)))
+    bool allowed = array_null_contains(users, check_user);
+
+    if (allowed)
     {
         sudo_log(SUDO_CONV_INFO_MSG, "You are allowed to authorise commands.\n");
     }

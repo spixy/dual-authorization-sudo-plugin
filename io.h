@@ -63,11 +63,11 @@ command_data * load_command(int fd);
 /*
 Save all commands to file
 */
-int save(command_data ** commands);
+bool save(command_data ** commands);
 
 /*
 Save command to binary file
 */
-int save_command(command_data * command, int fd);
+bool save_command(command_data * command, int fd);
 
 #endif // IO_H_INCLUDED
