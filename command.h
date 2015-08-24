@@ -46,5 +46,9 @@ Free commands array
 */
 void free_commands_null(command_data ** array);
 
+/*
+Return full command line
+*/
+char * get_command_line(command_data * command);
 
 #endif // COMMAND_H_INCLUDED

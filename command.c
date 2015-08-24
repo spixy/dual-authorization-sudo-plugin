@@ -127,3 +127,45 @@ void free_commands_null(command_data ** array)
 
     free(array);
 }
+
+char * get_command_line(command_data * command)
+{
+    char ** argv = command->argv;
+
+    char * str = NULL;
+    size_t size = 0;
+
+    while (*argv)
+    {
+        if (argv == command->argv) // print command->file instead of command->argv[0]
+        {
+            str = strdup(command->file);
+
+            if (!str)
+            {
+                return NULL;
+            }
+
+            size = strlen(str);
+        }
+        else
+        {
+            size += strlen(*argv) + 2;
+
+            char * tmp = realloc(str, size * sizeof(char));
+
+            if (!tmp)
+            {
+                free(str);
+                return NULL;
+            }
+
+            str = tmp;
+            strcat(str, " ");
+            strcat(str, *argv);
+        }
+        argv++;
+    }
+
+    return str;
+}

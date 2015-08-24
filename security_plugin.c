@@ -40,6 +40,14 @@ typedef enum
     FULL
 } print_mode;
 
+typedef enum
+{
+    AUTHORIZED,
+    EXECUTED,
+    SKIPPED,
+    ERROR
+} task_result;
+
 static sudo_conv_t sudo_conv;
 static sudo_printf_t sudo_log;
 static char * runas_user = NULL;
@@ -50,15 +58,17 @@ static char ** envp = NULL;
 static unsigned int min_auth_users = MIN_AUTH_USERS;
 static bool use_sudoedit = false;  // sudoedit mode
 static bool always_auth = false;   // always authorise before new command is added
+static int pam_auth_type = PAM_DISALLOW_NULL_AUTHTOK;
 static int commands_fd = -1;
 
 static int execute(command_data * command, bool as_root);
 static int run_editor(char * arg);
 static int run_diff(command_data * commmand);
 static int load_config();
+static void print_table_all_commands(command_data ** commands);
 static void print_command(command_data * command, print_mode mode);
-static int auth_remove(command_data ** cmds, int i);
-static int auth_exec(command_data ** cmds, int i);
+static task_result auth_remove(command_data ** cmds, int i);
+static task_result auth_exec(command_data ** cmds, int i);
 static int append_command(char * file, char ** argv, bool flag_sudoedit, char * authorised_by);
 static int sudoedit(char * file);
 static int try_lock(char * file);
@@ -72,6 +82,132 @@ struct pam_conv PAM_converse =
     PAM_conv,
     NULL
 };
+
+/*
+Get max length of selected table column
+*/
+static size_t field_size(command_data ** commands, int index, int min)
+{
+    command_data ** command = commands;
+
+    size_t max = min;
+    size_t len;
+    char * exec_by_users;
+    char * rem_by_users;
+
+    while (*command)
+    {
+        switch (index)
+        {
+            case 0:
+                if ((*command)->runas_user)
+                {
+                    len = strlen((*command)->runas_user);
+                    if (len > max)
+                        max = len;
+                }
+                break;
+
+            case 1:
+                if ((*command)->runas_group)
+                {
+                    len = strlen((*command)->runas_group);
+                    if (len > max)
+                        max = len;
+                }
+                break;
+
+            case 2:
+                exec_by_users = concat((*command)->exec_by_users, ",");
+                if (exec_by_users)
+                {
+                    len = strlen (exec_by_users);
+                    if (len > max)
+                        max = len;
+                    free(exec_by_users);
+                }
+                break;
+
+            case 3:
+                rem_by_users = concat((*command)->rem_by_users, ",");
+                if (rem_by_users)
+                {
+                    len = strlen (rem_by_users);
+                    if (len > max)
+                        max = len;
+                    free(rem_by_users);
+                }
+                break;
+        }
+
+        command++;
+    }
+
+    return max;
+}
+
+/*
+Prints commands in table
+*/
+static void print_table_all_commands(command_data ** commands)
+{
+    if (!commands)
+    {
+        return;
+    }
+
+    char runas_user_label[] = "USER";
+    char runas_group_label[] = "GROUP";
+    char exec_by_users_label[] = "TO EXECUTE";
+    char rem_by_users_label[] = "TO REMOVE";
+    char command_label[] = "COMMAND";
+
+    size_t columns_width[4];
+
+    columns_width[0] = field_size(commands, 0, strlen(runas_user_label)+1);
+    columns_width[1] = field_size(commands, 1, strlen(runas_group_label)+1);
+    columns_width[2] = field_size(commands, 2, strlen(exec_by_users_label)+1);
+    columns_width[3] = field_size(commands, 3, strlen(rem_by_users_label)+1);
+
+    size_t total_width = 0;
+    for (int i = 0; i < 4; i++)
+        total_width += columns_width[i];
+
+    sudo_log(SUDO_CONV_INFO_MSG, "%-*s%-*s%-*s%-*s %s\n",
+            columns_width[0], runas_user_label,
+            columns_width[1], runas_group_label,
+            columns_width[2], exec_by_users_label,
+            columns_width[3], rem_by_users_label,
+            command_label);
+
+    for (size_t i = 0; i < total_width; i++)
+        sudo_log(SUDO_CONV_INFO_MSG, "=");
+
+    sudo_log(SUDO_CONV_INFO_MSG, "\n");
+
+
+    command_data ** command = commands;
+
+    while (*command)
+    {
+        char * exec_by_users = concat((*command)->exec_by_users, ",");
+        char * rem_by_users  = concat((*command)->rem_by_users, ",");
+        char * cmd_line = get_command_line(*command);
+
+        sudo_log(SUDO_CONV_INFO_MSG, "%-*s%-*s%-*s%-*s %s\n",
+            columns_width[0], (*command)->runas_user,
+            columns_width[1], (*command)->runas_group,
+            columns_width[2], exec_by_users,
+            columns_width[3], rem_by_users,
+            cmd_line);
+
+        free(exec_by_users);
+        free(rem_by_users);
+        free(cmd_line);
+
+        command++;
+    }
+}
 
 /*
 Prints command with arguments
@@ -110,22 +246,10 @@ static void print_command(command_data * command, print_mode mode)
     }
 
     /* Other command */
-    char ** argv = command->argv;
 
-    while (*argv)
-    {
-        if (argv == command->argv) // print command->file instead of command->argv[0]
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, "%s", command->file);
-        }
-        else
-        {
-            sudo_log(SUDO_CONV_INFO_MSG, " %s", *argv);
-        }
-        argv++;
-    }
-
-    sudo_log(SUDO_CONV_INFO_MSG, "\n");
+    char * cmd_line = get_command_line(command);
+    sudo_log(SUDO_CONV_INFO_MSG, "%s\n", cmd_line);
+    free(cmd_line);
 
     if (mode == NORMAL || mode == FULL)
     {
@@ -695,7 +819,7 @@ static int check_pam()
     }
 
     /* Authenticate user  */
-    result = pam_authenticate(pamh, PAM_DISALLOW_NULL_AUTHTOK);
+    result = pam_authenticate(pamh, pam_auth_type);
 
     if (!check_pam_result(result))
     {
@@ -1102,7 +1226,7 @@ static int sudoedit(char * orig_file)
 Marks command for execution and/or execute command list
 Returns next index in command list
 */
-static int auth_exec(command_data ** cmds, int i)
+static task_result auth_exec(command_data ** cmds, int i)
 {
     // not authorised by me yet
     if (!array_null_contains(cmds[i]->exec_by_users, user))
@@ -1111,7 +1235,7 @@ static int auth_exec(command_data ** cmds, int i)
         if (!exec_by_user)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-            return false;
+            return ERROR;
         }
 
         // set me as authorised user
@@ -1128,19 +1252,19 @@ static int auth_exec(command_data ** cmds, int i)
         if (!save(cmds))
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot save commands.\n");
-            return -1;
+            return ERROR;
         }
 
         if (str_array_len(cmds[i]->exec_by_users) < min_auth_users)
         {
-            return ++i;
+            return AUTHORIZED;
         }
     }
     // already authorised by me and cannot run command
     else if (str_array_len(cmds[i]->exec_by_users) < min_auth_users)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorised, skipping.\n");
-        return ++i;
+        return SKIPPED;
     }
 
     bool runas_root = (cmds[i]->sudoedit);
@@ -1164,16 +1288,16 @@ static int auth_exec(command_data ** cmds, int i)
         if (!save(cmds))
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot save commands.\n");
-            return -1;
+            return ERROR;
         }
 
-        return i;
+        return EXECUTED;
     }
     else
     {
         // skip
         sudo_log(SUDO_CONV_ERROR_MSG, "Error in command execution, skipping.\n");
-        return ++i;
+        return SKIPPED;
     }
 }
 
@@ -1181,7 +1305,7 @@ static int auth_exec(command_data ** cmds, int i)
 Marks command for delete and/or remove command list
 Returns next index in command list
 */
-static int auth_remove(command_data ** cmds, int i)
+static task_result auth_remove(command_data ** cmds, int i)
 {
     // not authorised by me yet
     if (!array_null_contains(cmds[i]->rem_by_users, user))
@@ -1190,7 +1314,7 @@ static int auth_remove(command_data ** cmds, int i)
         if (!rem_by_user)
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot allocate data.\n");
-            return false;
+            return ERROR;
         }
 
         // set me as authorised user
@@ -1207,14 +1331,19 @@ static int auth_remove(command_data ** cmds, int i)
         if (!save(cmds))
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot remove command.\n");
-            return -1;
+            return ERROR;
+        }
+
+        if (str_array_len(cmds[i]->rem_by_users) < min_auth_users)
+        {
+            return AUTHORIZED;
         }
     }
     // already authorised by me and cannot run command
     else if (str_array_len(cmds[i]->rem_by_users) < min_auth_users)
     {
         sudo_log(SUDO_CONV_ERROR_MSG, "Command already authorised, skipping.\n");
-        return ++i;
+        return SKIPPED;
     }
 
     char * stored_user = getenv_from_envp("USER", cmds[i]->envp);
@@ -1244,15 +1373,15 @@ static int auth_remove(command_data ** cmds, int i)
         if (!save(cmds))
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "Cannot remove command.\n");
-            return -1;
+            return ERROR;
         }
 
-        return i;
+        return EXECUTED;
     }
     else
     {
         // skip
-        return ++i;
+        return AUTHORIZED;
     }
 }
 
@@ -1381,6 +1510,11 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
 
         sudo_log(SUDO_CONV_ERROR_MSG, "Stored commands:\n================\n");
 
+        /*if (show_only && mode == LIST)
+        {
+            print_table_all_commands(cmds);
+        }
+        else */
         while (cmds[i])
         {
             sudo_log(SUDO_CONV_ERROR_MSG, "%s%u/%u: ", (mode != LIST && i>0) ? "\n" : "", ++index, length);
@@ -1395,29 +1529,47 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             /* Execute all commands */
             else if (exec_only)
             {
-                int result = auth_exec(cmds, i);
-                if (result < 0)
-                {
-                    free_commands_null(cmds);
-                    free(message);
-                    return -1;
-                }
+                task_result result = auth_exec(cmds, i);
 
-                i = result;
+                switch (result)
+                {
+                    case EXECUTED:
+                        // index stays same
+                        break;
+
+                    case AUTHORIZED:
+                    case SKIPPED:
+                        i++;
+                        break;
+
+                    case ERROR:
+                        free_commands_null(cmds);
+                        free(message);
+                        return -1;
+                }
                 continue;
             }
             /* Remove all commands */
             else if (rem_only)
             {
-                int result = auth_remove(cmds, i);
-                if (result < 0)
-                {
-                    free_commands_null(cmds);
-                    free(message);
-                    return -1;
-                }
+                task_result result = auth_remove(cmds, i);
 
-                i = result;
+                switch (result)
+                {
+                    case EXECUTED:
+                        // index stays same
+                        break;
+
+                    case AUTHORIZED:
+                    case SKIPPED:
+                        i++;
+                        break;
+
+                    case ERROR:
+                        free_commands_null(cmds);
+                        free(message);
+                        return -1;
+                }
                 continue;
             }
 
@@ -1432,30 +1584,46 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             /* Execute */
             if (strcasecmp(replies[0].reply,"e") == 0)
             {
-                int result = auth_exec(cmds, i);
+                task_result result = auth_exec(cmds, i);
 
-                if (result < 0)
+                switch (result)
                 {
-                    free_commands_null(cmds);
-                    free(message);
-                    return -1;
-                }
+                    case EXECUTED:
+                        // index stay same
+                        break;
 
-                i = result;
+                    case AUTHORIZED:
+                    case SKIPPED:
+                        i++;
+                        break;
+
+                    case ERROR:
+                        free_commands_null(cmds);
+                        free(message);
+                        return -1;
+                }
             }
             /* Remove from list */
             else if (strcasecmp(replies[0].reply,"r") == 0)
             {
-                int result = auth_remove(cmds, i);
+                task_result result = auth_remove(cmds, i);
 
-                if (result < 0)
+                switch (result)
                 {
-                    free_commands_null(cmds);
-                    free(message);
-                    return -1;
-                }
+                    case EXECUTED:
+                        // index stay same
+                        break;
 
-                i = result;
+                    case AUTHORIZED:
+                    case SKIPPED:
+                        i++;
+                        break;
+
+                    case ERROR:
+                        free_commands_null(cmds);
+                        free(message);
+                        return -1;
+                }
             }
             /* Skip */
             else if (strcasecmp(replies[0].reply,"s") == 0)
@@ -1518,18 +1686,31 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
         }
 
         char * authorised_by = NULL;
+        bool authorised = false;
 
         if (always_auth)
         {
-            if (!check_pam(user))
+            if (check_pam(user))
+            {
+                authorised = true;
+            }
+            else
             {
                 return -1;
             }
         }
-        /* If user allowed to authorise => Authenticate user */
-        else if (array_null_contains(users, user) && check_pam(user))
+
+        /* If user is allowed to authorise */
+        if (array_null_contains(users, user))
         {
-            authorised_by = user;
+            if (authorised || check_pam(user))
+            {
+                authorised_by = user;
+            }
+            else
+            {
+                return -1;
+            }
         }
 
         char * path;
