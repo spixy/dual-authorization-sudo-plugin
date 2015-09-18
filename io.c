@@ -1,3 +1,11 @@
+/*
+ * Copyright 2015 Horváth Henrich
+ *
+ * Sudo security plugin is free software
+ * released under GNU Lesser General Public License.
+ *
+*/
+
 #include "io.h"
 
 int copy_file(char * from, int target_fd)

@@ -1,3 +1,11 @@
+/*
+ * Copyright 2015 Horváth Henrich
+ *
+ * Sudo security plugin is free software
+ * released under GNU Lesser General Public License.
+ *
+*/
+
 #ifndef COMMAND_H_INCLUDED
 #define COMMAND_H_INCLUDED
 
