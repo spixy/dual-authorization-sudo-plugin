@@ -14,6 +14,7 @@
 #include "utils.h"
 #include "command.h"
 #include "io.h"
+#include "strings.h"
 
 #include <errno.h>
 #include <grp.h>
@@ -764,7 +765,7 @@ static int PAM_conv(int num_msg, const struct pam_message **msg, struct pam_resp
                 msgs[0].msg = message;
 
                 /* Conversation */
-                if (sudo_conv(1, msgs, replies) != 0)
+                if (sudo_conv(1, msgs, replies, NULL) != 0)
                 {
                     free(message);
                     return PAM_CONV_ERR;
@@ -854,20 +855,20 @@ static int execute(command_data * command, bool as_root)
 
     pid_t pid;
 
-    if ((pid = fork()) < 0) /* Fork a child process */
+    if ((pid = fork()) < 0) // Fork a child process
     {
         return false;
     }
-    else if (pid == 0) /* For the child process */
+    else if (pid == 0) // For the child process
     {
         char * pwd = getenv_from_envp("PWD", command->envp);
 
         if (chdir(pwd) == -1)
         {
-            return false;
+            _exit(1);
         }
 
-        /* Run as group */
+        // Run as group
         if (command->runas_group && !as_root)
         {
             struct group * gid;
@@ -876,26 +877,26 @@ static int execute(command_data * command, bool as_root)
                 if (setgid(gid->gr_gid) == -1)
                 {
                     sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set gid to %d.\n", gid->gr_gid);
-                    return false;
+                    _exit(1);
                 }
             }
             else
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "Group %s not found.\n", command->runas_group);
-                return false;
+                _exit(1);
             }
         }
         else
         {
-            /* Run as root */
+            // Run as root
             if (setgid(0) == -1)
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set gid to %d.\n", 0);
-                return false;
+                _exit(1);
             }
         }
 
-        /* Run as user */
+        // Run as user
         if (command->runas_user && !as_root)
         {
             struct passwd * uid;
@@ -904,41 +905,43 @@ static int execute(command_data * command, bool as_root)
                 if (setuid(uid->pw_uid) == -1)
                 {
                     sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set uid to %d.\n", uid->pw_uid);
-                    return false;
+                    _exit(1);
                 }
             }
             else
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "User %s not found.\n", command->runas_user);
-                return false;
+                _exit(1);
             }
         }
         else
         {
-            /* Run as root */
+            // Run as root
             if (setuid(0) == -1)
             {
                 sudo_log(SUDO_CONV_ERROR_MSG, "Cannot set uid to %d.\n", 0);
-                return false;
+                _exit(1);
             }
         }
 
-        /* Execute the command  */
-        if (execve(command->file, &command->argv[0], &/*local_envp*/command->envp[0]) < 0)
+        // Execute the command
+        if (execve(command->file, &command->argv[0], &command->envp[0]) < 0)
         {
+            // Error
             _exit(1);
         }
 
+        // OK
         _exit(0);
     }
-    else /* For the parent  */
+    else // For the parent
     {
         int status;
-        while (wait(&status) != pid)
-        {
-            // wait
-        }
-        return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+        // Wait for process to exit
+        waitpid(pid, &status, 0);
+
+        return (status == 0);
     }
 }
 
@@ -1574,7 +1577,7 @@ static int sudo_check_policy(int argc, char * const argv[], char *env_add[], cha
             }
 
             /* Prompt administrator */
-            if (sudo_conv(1, msgs, replies) != 0)
+            if (sudo_conv(1, msgs, replies, NULL) != 0)
             {
                 free_commands_null(cmds);
                 free(message);
